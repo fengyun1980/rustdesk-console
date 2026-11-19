@@ -73,6 +73,7 @@ export class DatabaseInitService implements OnModuleInit {
     await this.cleanupUnusedDefaultOidcProviders();
     await this.cleanupExpiredAuthStates();
     await this.bootstrapServerManagementFromEnv();
+    await this.bootstrapGeneralSiteSettingsFromEnv();
     await this.bootstrapWebClientFromEnv();
   }
 
@@ -252,6 +253,89 @@ export class DatabaseInitService implements OnModuleInit {
     if (applied > 0) {
       this.logger.log(
         `Server management auto-bootstrapped ${applied} setting(s) from environment variables`,
+      );
+    }
+  }
+
+  /**
+   * Bootstrap General Site settings (frontend/backend URL) for All-in-One.
+   *
+   * 前端地址和后端地址用于 WebAuthn RP、OIDC callback 校验、邮件邀请链接等。
+   * AIO 场景下 Caddy 统一反代，前端和后端地址相同（都是 Console 公网地址）。
+   *
+   * 覆盖规则与 Web Client 一致：检测到 example.com/api.example.com 等占位符
+   * 或空值时强制覆盖；FORCE_WEB_CLIENT_BOOTSTRAP=1 时全量覆盖。
+   *
+   * 环境变量：
+   *   CONSOLE_PUBLIC_URL   完整公网地址，如 https://192.168.1.100:4443
+   *   SITE_FRONTEND_URL    可选，单独指定前端地址（覆盖 CONSOLE_PUBLIC_URL）
+   *   SITE_BACKEND_URL     可选，单独指定后端地址（覆盖 CONSOLE_PUBLIC_URL）
+   */
+  private async bootstrapGeneralSiteSettingsFromEnv(): Promise<void> {
+    const consoleUrl = process.env.CONSOLE_PUBLIC_URL?.trim();
+    const frontendUrl =
+      process.env.SITE_FRONTEND_URL?.trim() || consoleUrl;
+    const backendUrl =
+      process.env.SITE_BACKEND_URL?.trim() || consoleUrl;
+
+    if (!frontendUrl && !backendUrl) {
+      return; // 非 AIO 场景，没有可自动配置的值
+    }
+
+    const PLACEHOLDER_PATTERNS = [
+      'example.com',
+      'console.example',
+      'api.example',
+      'console.local',
+    ];
+    const FORCE = process.env.FORCE_WEB_CLIENT_BOOTSTRAP === '1';
+
+    const pairs: Array<[string, string]> = [];
+    if (frontendUrl) {
+      pairs.push(['general.siteFrontendUrl', frontendUrl]);
+    }
+    if (backendUrl) {
+      pairs.push(['general.siteBackendUrl', backendUrl]);
+    }
+
+    let applied = 0;
+    let overwritten = 0;
+    for (const [key, value] of pairs) {
+      const existing = await this.systemSettingRepository.findOne({
+        where: { key },
+      });
+
+      if (existing && !FORCE) {
+        const oldVal = (existing.value || '').toLowerCase();
+        const isPlaceholder = PLACEHOLDER_PATTERNS.some((p) =>
+          oldVal.includes(p),
+        );
+        const isEmpty = !oldVal || oldVal.trim() === '';
+        if (!isPlaceholder && !isEmpty) continue;
+      }
+
+      await this.systemSettingRepository.save(
+        this.systemSettingRepository.create({
+          key,
+          value,
+          category: 'general',
+          description: FORCE
+            ? 'Force-refreshed by AIO bootstrap (FORCE_WEB_CLIENT_BOOTSTRAP=1)'
+            : 'Auto-bootstrapped by DatabaseInitService (AIO)',
+          isSensitive: false,
+        }),
+      );
+      if (existing) overwritten += 1;
+      else applied += 1;
+    }
+
+    const total = applied + overwritten;
+    if (total > 0) {
+      const parts: string[] = [];
+      if (applied > 0) parts.push(`${applied} new`);
+      if (overwritten > 0) parts.push(`${overwritten} overwritten`);
+      this.logger.log(
+        `[AIO] General site settings auto-configured (${parts.join(', ')})`,
       );
     }
   }
