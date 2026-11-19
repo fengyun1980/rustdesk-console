@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: docker-push-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -18,102 +18,78 @@ permissions:
 
 jobs:
   docker:
-    name: Build (and optionally push)
+    name: Build (amd64) and optionally push
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
-
       - uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub (if secrets configured)
-        id: login
-        if: env.DOCKER_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # 有 secrets 就 push 到 Docker Hub；没有就 build 完 save artifact
+      - name: Compute tags + login
+        id: setup
         env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Compute tags
-        id: tags
+          DU: ${{ secrets.DOCKER_USERNAME }}
+          DT: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          if [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
-            IMAGE="${{ secrets.DOCKER_USERNAME }}/rustdesk-console"
+          if [ -n "$DU" ] && [ -n "$DT" ]; then
+            IMAGE="${DU}/rustdesk-console"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "DOCKER_USERNAME=$DU" >> "$GITHUB_ENV"
+            echo "DOCKERHUB_TOKEN=$DT" >> "$GITHUB_ENV"
           else
             IMAGE="rustdesk-console"
+            echo "push=false" >> "$GITHUB_OUTPUT"
           fi
-          SHA7="${GITHUB_SHA::7}"
-          TAGS_LIST="
-            ${IMAGE}:sha-${SHA7}
-          "
+
           REF="${GITHUB_REF}"
-          if [ "$REF" = "refs/heads/main" ]; then
-            TAGS_LIST="
-              ${TAGS_LIST}
-              ${IMAGE}:latest
-              ${IMAGE}:main
-            "
-          fi
-          if [ "$REF" = "refs/heads/trae/agent-0sKjvb" ]; then
-            TAGS_LIST="
-              ${TAGS_LIST}
-              ${IMAGE}:aio
-            "
-          fi
+          SHA7="${GITHUB_SHA::7}"
+          TAGS="${IMAGE}:sha-${SHA7}"
+          [ "$REF" = "refs/heads/main" ] && TAGS="$TAGS
+${IMAGE}:latest"
+          [ "$REF" = "refs/heads/trae/agent-0sKjvb" ] && TAGS="$TAGS
+${IMAGE}:aio"
           case "$REF" in
             refs/tags/v*)
-              VER="${GITHUB_REF_NAME#v}"
-              MINOR="${VER%.*}"
-              TAGS_LIST="
-                ${TAGS_LIST}
-                ${IMAGE}:${VER}
-                ${IMAGE}:${MINOR}
-                ${IMAGE}:latest
-              "
-              ;;
+              V="${GITHUB_REF_NAME#v}"; M="${V%.*}"
+              TAGS="$TAGS
+${IMAGE}:${V}
+${IMAGE}:${M}
+${IMAGE}:latest" ;;
           esac
-          CLEAN=$(echo "$TAGS_LIST" | sed '/^[[:space:]]*$/d' | sed 's/^[[:space:]]*//' | sort -u)
-          {
-            echo "tags<<GHAEOF"
-            echo "$CLEAN"
-            echo "GHAEOF"
-          } >> "$GITHUB_OUTPUT"
-          echo "=== Will build/push these tags ==="
-          echo "$CLEAN"
+          CLEAN=$(echo "$TAGS" | sed '/^[[:space:]]*$/d' | sort -u)
+          { echo "tags<<EOF"; echo "$CLEAN"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          echo "=== TAGS ==="; echo "$CLEAN"
+
+      - name: Login to Docker Hub
+        if: steps.setup.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ steps.login.outcome == 'success' }}
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.tags.outputs.tags }}
+          push: ${{ steps.setup.outputs.push == 'true' }}
+          platforms: linux/amd64
+          tags: ${{ steps.setup.outputs.tags }}
           build-args: |
             APP_VERSION=${{ github.ref_name }}
             SOURCE_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: ${{ steps.login.outcome == 'success' && 'type=registry' || 'type=docker' }}
 
-      # 没 push 的话，把 build 好的镜像保存成 tar 供下载
-      - name: Save image as artifact
-        if: steps.login.outcome != 'success'
+      - name: Save image to artifact
+        if: steps.setup.outputs.push != 'true'
         run: |
-          IMAGE="rustdesk-console:aio"
-          SHA7="${GITHUB_SHA::7}"
-          TAGGED="rustdesk-console:sha-${SHA7}"
-          docker tag "$TAGGED" "$IMAGE" 2>/dev/null || true
-          docker save -o rustdesk-console-aio.tar "$IMAGE" "$TAGGED"
+          docker save -o rustdesk-console-aio.tar rustdesk-console:aio
           ls -lh rustdesk-console-aio.tar
 
       - uses: actions/upload-artifact@v4
-        if: steps.login.outcome != 'success'
+        if: steps.setup.outputs.push != 'true'
         with:
-          name: rustdesk-console-aio
+          name: rustdesk-console-aio-amd64
           path: rustdesk-console-aio.tar
-          if-no-files-found: error
           retention-days: 7
