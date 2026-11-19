@@ -173,4 +173,6 @@ fi
 # ------------- 7. 启动 Compose -------------
 echo ""
 echo "🚀 启动 All-in-One..."
-exec docker compose -f docker-compose.all-in-one.yml up -d "${COMPOSE_ARGS[@]}"
+# 用 --env-file 让 compose 直接读 secrets.env（不依赖 shell source）
+# 这样 hbbs/hbbr 的 RD_MANAGEMENT_TOKEN 等变量一定能传到容器
+exec docker compose --env-file "$SECRETS_FILE" -f docker-compose.all-in-one.yml up -d "${COMPOSE_ARGS[@]}"
