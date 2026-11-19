@@ -35,37 +35,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set tags matrix
-        id: tags
+      - name: Generate tags
+        id: meta
         run: |
           IMAGE="ghcr.io/${{ github.repository }}"
           SHA_SHORT="${GITHUB_SHA::7}"
-          TAGS="type=raw,value=${IMAGE}:sha-${SHA_SHORT}"
+          TAGS="${IMAGE}:sha-${SHA_SHORT}"
 
           if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            TAGS="${TAGS},type=raw,value=${IMAGE}:latest,type=raw,value=${IMAGE}:main"
+            TAGS="${TAGS}
+${IMAGE}:latest
+${IMAGE}:main"
           fi
 
           if [ "${GITHUB_REF}" = "refs/heads/trae/agent-0sKjvb" ]; then
-            TAGS="${TAGS},type=raw,value=${IMAGE}:aio"
+            TAGS="${TAGS}
+${IMAGE}:aio"
           fi
 
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
             MINOR="${VERSION%.*}"
-            TAGS="${TAGS},type=raw,value=${IMAGE}:latest,type=raw,value=${IMAGE}:${VERSION},type=raw,value=${IMAGE}:${MINOR}"
+            TAGS="${TAGS}
+${IMAGE}:latest
+${IMAGE}:${VERSION}
+${IMAGE}:${MINOR}"
           fi
 
-          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-          echo "TAGS matrix:"
-          echo "${TAGS}" | tr ',' '\n'
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$TAGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "=== Will push these tags ==="
+          echo "$TAGS"
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             APP_VERSION=${{ github.ref_name }}
             SOURCE_COMMIT=${{ github.sha }}
