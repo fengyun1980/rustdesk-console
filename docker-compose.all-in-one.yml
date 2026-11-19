@@ -1,29 +1,58 @@
-# All-in-One 一键部署
-# 整合 rustdesk-console（后端）+ rustdesk-console-web（前端）+ rustdesk-server（hbbs/hbbr）
+# All-in-One 一键部署（全自动零配置）
+# 整合：rustdesk-console + rustdesk-console-web + rustdesk-server(hbbs/hbbr) + Caddy 反代
 #
-# 推荐启动（自动生成密钥，无需任何配置）：
+# 唯一启动命令：
 #   bash bin/aio-up.sh
+#
+# 带域名（可选，自动 HTTPS / Let's Encrypt）：
+#   bash bin/aio-up.sh -d rustdesk.example.com
 #
 # 停止：
 #   bash bin/aio-down.sh
 #
-# 首次启动后：
-#   浏览器访问  http://<主机IP>:21114
-#   用户名 admin / 密码 admin
+# 自动行为：
+#   · 自动生成 JWT_SECRET / SERVER_MANAGEMENT_TOKEN
+#   · 自动探测 PUBLIC_HOST（hostname -I）
+#   · 自动生成 Caddyfile（有域名→LE；无域名→自签 HTTPS）
+#   · 自动对接 Server Management + Web Client
+#   · 自动等 hbbs 起来读公钥
+#   · 自动启用网页远控（wss 或 ws，按场景降级）
 #
-# 密钥文件位置（aio-up.sh 首次启动自动生成，后续重启复用）：
-#   ./data/secrets/secrets.env   如需手动重置密钥：删除此文件，重新 aio-up.sh
+# 端口：
+#   80    Caddy HTTP → HTTPS 跳转 / 纯 HTTP
+#   443   Caddy HTTPS → 反代 Console
+#   21115 hbbs 注册（TCP）
+#   21116 hbbs 心跳（TCP + UDP）
+#   21117 hbbr 中继（TCP）
+#   21120 hbbs 管理 API（仅容器内部）
 #
-# 端口（21114 是唯一浏览器入口，21115-21119 供 RustDesk 客户端使用）：
-#   21114  Console Web 前端
-#   21115  hbbs 注册（TCP）
-#   21116  hbbs 心跳（TCP + UDP）
-#   21117  hbbr 中继（TCP）
-#   21118  hbbs WebSocket ID
-#   21119  hbbr WebSocket Relay
-#   21120  hbbs 管理 API（仅容器内部）
+# 说明：
+#   · 21118 / 21119 的 WebSocket 端口**不再对外暴露**——Gateway 模式下
+#     Caddy 反代 → Console Gateway 鉴权 → 内部直连 hbbs/hbbr，更安全
+#   · 纯 RustDesk 客户端（非网页）直接用 hbbs 原生端口，仍然需要客户端
+#     侧设置 relay address（首次部署后在 Console Settings 里填）
 
 services:
+  # ============ Caddy — 自动 HTTPS + 反代 ============
+  # 纯文件驱动：aio-up.sh 会根据场景（有域名/裸 IP）生成 Caddyfile
+  # 有域名 → 自动 Let's Encrypt + HTTP→HTTPS 跳转
+  # 无域名 → tls internal 自签，浏览器首次访问点「继续访问」
+  caddy:
+    image: caddy:2-alpine
+    container_name: rustdesk-caddy
+    restart: unless-stopped
+    ports:
+      - '${CADDY_HTTP_PORT:-80}:80'
+      - '${CADDY_HTTPS_PORT:-443}:443'
+    volumes:
+      - ./deploy/Caddyfile.generated:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - rustdesk-console-web
+    networks:
+      - rustdesk-aio
+
   # ============ RustDesk Console 后端 ============
   rustdesk-console:
     build:
@@ -66,12 +95,13 @@ services:
       - rustdesk-aio
 
   # ============ RustDesk Console Web 前端 ============
+  # 不对外暴露端口 —— 只被 Caddy 反代（端口转发由 caddy 处理）
   rustdesk-console-web:
     image: databk/rustdesk-console-web:latest
     container_name: rustdesk-console-web
     restart: unless-stopped
-    ports:
-      - '21114:80'
+    expose:
+      - '80'
     environment:
       BACKEND_URL: http://rustdesk-console:3000
     depends_on:
@@ -100,7 +130,10 @@ services:
       - '21115:21115'
       - '21116:21116'
       - '21116:21116/udp'
-      - '21118:21118'
+      # 21118 是 WebSocket ID 端口 —— Gateway 模式下 Caddy → Console 内部直连，
+      # 不再对外暴露（让 Gateway 做鉴权 + 审计）
+    expose:
+      - '21118'
     volumes:
       - ${SERVER_DATA_DIR:-./data/server}:/data
     networks:
@@ -121,7 +154,9 @@ services:
       RD_RELAY_ADDRESS: ${RUSTDESK_RELAY_ADDRESS:-}
     ports:
       - '21117:21117'
-      - '21119:21119'
+      # 21119 是 WebSocket Relay 端口 —— Gateway 模式下不再对外暴露
+    expose:
+      - '21119'
     volumes:
       - ${RELAY_DATA_DIR:-./data/server-relay}:/data
     networks:
@@ -131,3 +166,7 @@ networks:
   rustdesk-aio:
     name: rustdesk-aio
     driver: bridge
+
+volumes:
+  caddy-data:
+  caddy-config:
