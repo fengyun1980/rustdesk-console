@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   Logger,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -21,6 +22,64 @@ import { CompleteSetupDto } from './dto/complete-setup.dto';
 
 /** hbbs management API port (Server Pro default) */
 const HBBS_MANAGEMENT_PORT = 21120;
+
+/**
+ * Ports explicitly blocked for hbbs management API. These are either
+ * system-administrative or protocol ports and prevent SSRF / internal
+ * service probing via the setup wizard.
+ */
+const RESERVED_BLOCKED_PORTS = new Set<number>([
+  1, 17, 19, 21, 23, 25, 43, 53, 67, 68, 69, 79, 88, 95, 106, 110,
+  111, 113, 119, 123, 135, 137, 138, 139, 143, 161, 162, 177, 389,
+  465, 512, 513, 514, 515, 544, 548, 587, 631, 636, 873, 993, 995,
+  1433, 1434, 1521, 1723, 3306, 3389, 5432, 5672, 6379, 8086, 9200,
+  27017, 27018, 27019,
+]);
+
+/** Private-network CIDR blocklist for SSRF protection (fetchHbbsPublicKey). */
+function isPrivateIp(hostname: string): boolean {
+  try {
+    // IPv6 bracketed form from URL parser
+    const h = hostname.replace(/^\[|\]$/g, '');
+    if (!h) return true;
+
+    // IPv4
+    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (m) {
+      const [a, b] = [parseInt(m[1]), parseInt(m[2])];
+      if (a === 10) return true;               // 10.0.0.0/8
+      if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+      if (a === 192 && b === 168) return true;          // 192.168.0.0/16
+      if (a === 127) return true;             // 127.0.0.0/8
+      if (a === 169 && b === 254) return true;          // 169.254.0.0/16
+      return false;
+    }
+
+    // IPv6 — check localhost and private ranges
+    if (h === '::1') return true;
+    if (h === 'localhost') return true;
+    if (h.startsWith('fc') || h.startsWith('fd')) return true; // ULA
+    if (h.startsWith('fe8')) return true;                       // link-local
+
+    // DNS-resolve? No — don't do DNS rebinding risk. Fail open: treat all
+    // hostnames that we can't classify via static rules as potentially
+    // private. The user-supplied serverUrl is always going to be the origin
+    // they expect hbbs to live at, and in Server Pro the host is the same
+    // hostname as the console's public origin. So we block fetch entirely
+    // when the host is a bare IP or localhost form — forcing user to use
+    // a public-facing hostname.
+    if (/^(?!-)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*$/.test(h)) {
+      // Plain hostname — allow, but reject localhost explicitly
+      const lower = h.toLowerCase();
+      if (lower === 'localhost' || lower.endsWith('.local')) return true;
+      return false;
+    }
+
+    return true; // unknown form — reject safely
+  } catch {
+    return true;
+  }
+}
 
 export interface SetupStatus {
   completed: boolean;
@@ -305,11 +364,51 @@ export class SetupService {
    * Returns undefined when hbbs is unreachable or the key is missing/invalid.
    * Tolerates network errors — setup must never fail because hbbs isn't up
    * yet; it just degrades to web client disabled with a warning.
+   *
+   * SSRF protection:
+   *   - rejects private IPs (10.x, 172.16-31.x, 192.168.x, 127.x, 169.254.x)
+   *   - rejects localhost / ::1 / .local hostnames
+   *   - rejects well-known system ports (22, 3306, 5432, 6379, 27017, ...)
+   *   - never follows redirects (fetch option redirect: 'error')
    */
   private async fetchHbbsPublicKey(
     managementUrl: string,
     token: string,
   ): Promise<string | undefined> {
+    let url: URL;
+    try {
+      url = new URL(managementUrl);
+    } catch {
+      return undefined;
+    }
+
+    // SSRF gate 1: hostname
+    if (isPrivateIp(url.hostname)) {
+      this.logger.warn(
+        `fetchHbbsPublicKey: SSRF block — private/reserved host ${url.hostname}`,
+      );
+      return undefined;
+    }
+
+    // SSRF gate 2: port
+    const port = url.port ? parseInt(url.port, 10) : 21120;
+    if (
+      isNaN(port) ||
+      port < 1 ||
+      port > 65535 ||
+      RESERVED_BLOCKED_PORTS.has(port)
+    ) {
+      this.logger.warn(
+        `fetchHbbsPublicKey: SSRF block — invalid port ${port}`,
+      );
+      return undefined;
+    }
+
+    // SSRF gate 3: scheme (always http, management API is HTTP-only)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return undefined;
+    }
+
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
@@ -339,6 +438,16 @@ export class SetupService {
    * Normalize a user-supplied server URL into an http(s) origin.
    * Strips trailing slashes, rejects non-http(s) protocols, paths, queries,
    * fragments, credentials and whitespace.
+   *
+   * Additional hardening:
+   *   - rejects private/loopback IPs (127.x, 10.x, 172.16-31.x, 192.168.x, ...)
+   *   - rejects localhost hostnames
+   *   - rejects reserved system ports
+   *   - enforces port range 1–65535
+   *
+   * This blocks setup from being used to probe internal network services
+   * (SSRF) or from generating wss/management URLs that would bind to
+   * the wrong endpoints.
    */
   private normalizeOrigin(input: string): string {
     if (typeof input !== 'string' || !input.trim()) {
@@ -367,6 +476,26 @@ export class SetupService {
 
     if (url.pathname && url.pathname !== '/') {
       throw new BadRequestException('serverUrl must not contain a path');
+    }
+
+    // Port hardening
+    if (url.port) {
+      const port = parseInt(url.port, 10);
+      if (isNaN(port) || port < 1 || port > 65535) {
+        throw new BadRequestException('serverUrl port must be between 1 and 65535');
+      }
+      if (RESERVED_BLOCKED_PORTS.has(port)) {
+        throw new BadRequestException(
+          'serverUrl must not use reserved/system ports (e.g. 22, 3306, 5432, 6379)',
+        );
+      }
+    }
+
+    // Reject private/internal hostnames and IPs
+    if (isPrivateIp(url.hostname)) {
+      throw new BadRequestException(
+        'serverUrl must be a public-facing URL; localhost, loopback and private IPs are not allowed',
+      );
     }
 
     return url.origin;

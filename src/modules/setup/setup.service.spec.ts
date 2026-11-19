@@ -223,11 +223,11 @@ describe('SetupService', () => {
   it('skips web client config for HTTP origin, emits http_only warning', async () => {
     const result = await service.complete({
       ...BASE_DTO,
-      serverUrl: 'http://192.168.1.100:8080',
+      serverUrl: 'http://console.example.com:8080',
       serverPublicKey: VALID_PUBLIC_KEY,
     });
 
-    expect(result.origin).toBe('http://192.168.1.100:8080');
+    expect(result.origin).toBe('http://console.example.com:8080');
     expect(result.webClient.eligible).toBe(false);
     expect(result.webClient.enabled).toBe(false);
     expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();
