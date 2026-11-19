@@ -237,13 +237,12 @@ export class SetupService {
    * fragments, credentials and whitespace.
    */
   private normalizeOrigin(input: string): string {
-    const trimmed = input.trim();
-    if (!trimmed) {
+    // Reject anything containing whitespace anywhere (including leading/trailing).
+    // Users shouldn't need to trim — if they paste " https://x ", something is wrong.
+    if (typeof input !== 'string' || !input.trim()) {
       throw new BadRequestException('serverUrl is required');
     }
-
-    // Reject whitespace / backslash / query / fragment outright
-    if (/[\s\\?#]/.test(trimmed)) {
+    if (input !== input.trim() || /[\s\\?#]/.test(input)) {
       throw new BadRequestException(
         'serverUrl must be an http(s) origin without path, query, fragment or whitespace',
       );
@@ -251,7 +250,7 @@ export class SetupService {
 
     let url: URL;
     try {
-      url = new URL(trimmed);
+      url = new URL(input);
     } catch {
       throw new BadRequestException('serverUrl is not a valid URL');
     }
@@ -264,8 +263,8 @@ export class SetupService {
       throw new BadRequestException('serverUrl must not contain credentials');
     }
 
-    // Reject anything beyond scheme+host (URL.pathname always starts with '/'
-    // so we compare against '/' to check for an empty path)
+    // Reject anything beyond scheme+host (pathname always starts with '/' —
+    // an empty path has pathname === '/')
     if (url.pathname && url.pathname !== '/') {
       throw new BadRequestException('serverUrl must not contain a path');
     }

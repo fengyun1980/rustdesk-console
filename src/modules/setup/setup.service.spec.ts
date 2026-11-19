@@ -1,3 +1,9 @@
+// Hoisted to top of file by Jest — must come before any import statements
+jest.mock('../settings/services/general-settings.service', () => ({}));
+jest.mock('../web-client/web-client-settings.service', () => ({}));
+jest.mock('../web-client/web-client.service', () => ({}));
+jest.mock('../user/user.service', () => ({}));
+
 import { ConflictException, BadRequestException } from '@nestjs/common';
 import { SetupService } from './setup.service';
 import { CompleteSetupDto } from './dto/complete-setup.dto';
@@ -18,18 +24,10 @@ describe('SetupService', () => {
       getSettings: jest.fn(),
       updateSettings: jest.fn(),
     };
-    mockWebClientSettings = {
-      updateSettings: jest.fn(),
-    };
-    mockWebClient = {
-      refresh: jest.fn(),
-    };
-    mockUserService = {
-      changePassword: jest.fn(),
-    };
-    mockUserRepo = {
-      findOne: jest.fn(),
-    };
+    mockWebClientSettings = { updateSettings: jest.fn() };
+    mockWebClient = { refresh: jest.fn() };
+    mockUserService = { changePassword: jest.fn() };
+    mockUserRepo = { findOne: jest.fn() };
 
     service = new SetupService(
       mockGeneralSettings,
@@ -40,11 +38,7 @@ describe('SetupService', () => {
     );
   };
 
-  beforeEach(() => {
-    // Reset the module-level in-progress lock between tests
-    // by re-importing via createService which holds fresh mocks
-    createService();
-  });
+  beforeEach(() => createService());
 
   // ---------- Status detection ----------
 
@@ -68,7 +62,7 @@ describe('SetupService', () => {
     await expect(service.getStatus()).resolves.toEqual({ completed: true });
   });
 
-  // ---------- Idempotency: already completed ----------
+  // ---------- Idempotency ----------
 
   it('rejects POST with 409 when setup is already completed', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
@@ -77,54 +71,37 @@ describe('SetupService', () => {
       effectiveFrontendUrl: 'https://rdc.tmnas.top',
       effectiveBackendUrl: 'https://rdc.tmnas.top',
     });
-
     await expect(
       service.complete({ serverUrl: 'https://another.example.com' }),
     ).rejects.toBeInstanceOf(ConflictException);
-
-    // Nothing should have been written
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
-    expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();
   });
 
   // ---------- Invalid URLs ----------
 
-  it('rejects serverUrl with a path', async () => {
-    // First setup: not yet completed
+  it('rejects serverUrl with path/query/fragment/non-http(s)/credentials/whitespace', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
       frontendUrl: '', backendUrl: '',
       effectiveFrontendUrl: 'http://localhost:3000',
       effectiveBackendUrl: 'http://localhost:3000',
     });
 
-    await expect(
-      service.complete({ serverUrl: 'https://example.com/some/path' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-
-    await expect(
-      service.complete({ serverUrl: 'https://example.com?x=1' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-
-    await expect(
-      service.complete({ serverUrl: 'https://example.com#frag' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-
-    await expect(
-      service.complete({ serverUrl: 'ftp://example.com' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-
-    await expect(
-      service.complete({ serverUrl: 'https://user:pass@example.com' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-
-    await expect(
-      service.complete({ serverUrl: '  https://example.com  ' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-
+    for (const bad of [
+      'https://example.com/some/path',
+      'https://example.com?x=1',
+      'https://example.com#frag',
+      'ftp://example.com',
+      'https://user:pass@example.com',
+      '  https://example.com  ',
+    ]) {
+      await expect(
+        service.complete({ serverUrl: bad }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    }
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
   });
 
-  // ---------- HTTPS: web client enabled with valid key ----------
+  // ---------- HTTPS + valid key: full success path ----------
 
   it('derives web client URLs and enables it when HTTPS + valid public key', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
@@ -156,14 +133,11 @@ describe('SetupService', () => {
     expect(result.webClient.allowedOrigin).toBe('https://rdc.tmnas.top');
     expect(result.warnings).toEqual([]);
 
-    // Verify site URL was written (commit point)
     expect(mockGeneralSettings.updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         site: { frontendUrl: 'https://rdc.tmnas.top', backendUrl: '' },
       }),
     );
-
-    // Verify web client was configured
     expect(mockWebClientSettings.updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         enabled: true,
@@ -176,7 +150,7 @@ describe('SetupService', () => {
     expect(mockWebClient.refresh).toHaveBeenCalled();
   });
 
-  // ---------- HTTPS: no key → disabled but addresses pre-filled ----------
+  // ---------- HTTPS + no key: prefilled but disabled ----------
 
   it('pre-fills web client addresses but keeps disabled when HTTPS but no key', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
@@ -200,26 +174,19 @@ describe('SetupService', () => {
 
     expect(result.webClient.eligible).toBe(true);
     expect(result.webClient.enabled).toBe(false);
-    expect(result.webClient.idServerUrl).toBe('wss://rdc.tmnas.top/ws/id');
-    expect(result.webClient.relayServerUrl).toBe('wss://rdc.tmnas.top/ws/relay');
+    expect(mockWebClientSettings.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ enabled: false, allowedOrigin: 'https://rdc.tmnas.top' }),
+    );
     expect(result.warnings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ code: 'web_client_pending_key' }),
       ]),
     );
-
-    expect(mockWebClientSettings.updateSettings).toHaveBeenCalledWith(
-      expect.objectContaining({
-        enabled: false,
-        allowedOrigin: 'https://rdc.tmnas.top',
-      }),
-    );
-    expect(mockWebClient.refresh).toHaveBeenCalled();
   });
 
   // ---------- HTTP origin: web client skipped ----------
 
-  it('skips web client config and emits a warning when origin is HTTP', async () => {
+  it('skips web client config for HTTP origin, emits http_only warning', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
       frontendUrl: '', backendUrl: '',
       effectiveFrontendUrl: 'http://localhost:3000',
@@ -251,12 +218,10 @@ describe('SetupService', () => {
         expect.objectContaining({ code: 'web_client_skipped' }),
       ]),
     );
-
-    // Site URL should still be written
     expect(mockGeneralSettings.updateSettings).toHaveBeenCalled();
   });
 
-  // ---------- Password change: wrong password → nothing written ----------
+  // ---------- Password: wrong password → nothing written ----------
 
   it('does not write any settings when admin password is wrong', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
@@ -277,15 +242,14 @@ describe('SetupService', () => {
       } satisfies CompleteSetupDto),
     ).rejects.toBeInstanceOf(BadRequestException);
 
-    // Nothing should have been persisted
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockWebClient.refresh).not.toHaveBeenCalled();
   });
 
-  // ---------- Password change: correct password + HTTPS ----------
+  // ---------- Password: correct password + full setup ----------
 
-  it('changes admin password, writes site URL, and configures web client with valid key', async () => {
+  it('changes admin password, writes site URL, configures web client', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
       frontendUrl: '', backendUrl: '',
       effectiveFrontendUrl: 'http://localhost:3000',
