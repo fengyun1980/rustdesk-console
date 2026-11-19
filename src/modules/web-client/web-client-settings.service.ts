@@ -136,8 +136,12 @@ export function resolveWebClientSettings(
   } catch {
     throw issue('allowedOrigin');
   }
+  // 允许 https:（生产安全路径）和 http:（纯内网/localhost 开发）
+  // http: 场景下浏览器只能连 ws://，所以 idServerUrl/relayServerUrl 也必须降级为 ws:
+  const allowedProtocols = ['https:'];
+  if (settings.idServerUrl?.startsWith('ws:')) allowedProtocols.push('http:');
   if (
-    parsedOrigin.protocol !== 'https:' ||
+    !allowedProtocols.includes(parsedOrigin.protocol) ||
     parsedOrigin.username ||
     parsedOrigin.password ||
     parsedOrigin.origin !== origin

@@ -9,14 +9,15 @@
 #   4. 启动后 Console 会自动等 hbbs 起来读公钥、配置 Web Client
 #
 # 使用：
-#   bash bin/aio-up.sh                        # 后台启动（纯内网 HTTP）
-#   bash bin/aio-up.sh -d rustdesk.example.com # 带 HTTPS 域名，自动启用网页远控
+#   bash bin/aio-up.sh                        # 后台启动（纯内网 HTTP，自动启用网页远控）
+#   bash bin/aio-up.sh -d rustdesk.example.com # 带 HTTPS 域名，自动启用 WSS 网页远控
+#   bash bin/aio-up.sh --http                 # 强制 HTTP（虽然默认就是 HTTP，显式写更清楚）
 #   bash bin/aio-up.sh --build                # 重建 backend 镜像
-#   bash bin/aio-up.sh --build -d rustdesk.example.com
 #   bash bin/aio-up.sh -d rustdesk.example.com --force-recreate
 #
 # 首次启动后：浏览器访问 http://<IP>:21114，admin / admin 登录
-# 配好反代域名 + TLS 后：浏览器访问 https://<域名>，网页远控自动可用
+# 配好 Lucky 反代 + TLS 后：浏览器访问 https://<域名>，网页远控自动启用 WSS
+# 没配反代也没关系：直接裸 IP 访问 HTTP，网页远控用 ws:// 明文（内网安全）
 # =====================================================================
 set -euo pipefail
 

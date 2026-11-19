@@ -275,8 +275,7 @@ export class DatabaseInitService implements OnModuleInit {
     const serverDir = resolve(dataDir, 'server');
     const publicKeyPath = resolve(serverDir, 'id_ed25519.pub');
 
-    // Fast path: hbbs 容器没跑 / 数据目录为空 → 根本不会有公钥，
-    // 直接 skip 避免单元测试或普通部署里白等 60 秒。
+    // Fast path: hbbs 数据目录都不存在 → 肯定没有公钥（非 AIO 场景），直接 skip。
     if (!existsSync(serverDir)) {
       this.logger.debug(
         `[AIO] hbbs data dir not found at ${serverDir}; skipping Web Client auto-bootstrap`,
@@ -284,61 +283,14 @@ export class DatabaseInitService implements OnModuleInit {
       return;
     }
 
-    // Poll only when the directory exists (hbbs 数据已挂载) but the key file has not appeared yet.
-    let publicKey: string | undefined;
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      if (existsSync(publicKeyPath)) {
-        const content = readFileSync(publicKeyPath, 'utf8').trim();
-        // OpenSSH ed25519 公钥格式: "ssh-ed25519 <base64-blob> [comment]"
-        // base64-blob 解出来是: [u32=11]["ssh-ed25519"][u32=32][32字节裸公钥]
-        const match = content.match(/^ssh-ed25519\s+([A-Za-z0-9+/=]+)/);
-        if (match) {
-          const blob = Buffer.from(match[1], 'base64');
-          // 按 wire format 头解析，兼容未来 keytype 变化
-          const keytypeLen = blob.readUInt32BE(0);
-          const pubkeyLen = blob.readUInt32BE(4 + keytypeLen);
-          const pubkeyStart = 4 + keytypeLen + 4;
-          const rawPubkey = blob.slice(pubkeyStart, pubkeyStart + pubkeyLen);
-          // 必须正好 32 字节且 base64 roundtrip 不变 —— resolveWebClientSettings 强校验
-          if (
-            rawPubkey.length === 32 &&
-            rawPubkey.toString('base64') === Buffer.from(rawPubkey.toString('base64'), 'base64').toString('base64')
-          ) {
-            publicKey = rawPubkey.toString('base64');
-            break;
-          }
-          this.logger.warn(
-            `[AIO] hbbs public key parsed but raw pubkey is ${rawPubkey.length} bytes (expected 32); retrying...`,
-          );
-        }
-      }
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-
-    if (!publicKey) {
-      this.logger.warn(
-        `[AIO] hbbs public key not found at ${publicKeyPath} within 60s; ` +
-          'skipping Web Client auto-bootstrap (hbbs may still be starting).',
-      );
-      return;
-    }
-
+    // ---- 1. 决定 serverUrl 协议（wss vs ws）和 enabled 条件 ----
     const allowedOrigin = process.env.WEB_CLIENT_ORIGIN?.trim();
-    const enableWebClient =
-      !!allowedOrigin && allowedOrigin.startsWith('https://');
-
-    // ---- idServerUrl / relayServerUrl 构建 ----
-    // 这俩是浏览器直接连接的 WSS 地址，走 Console Gateway：
-    //   浏览器 → wss://<host>/ws/id  → Lucky/Caddy → Console NestJS → idUpstreamUrl → hbbs
-    //                          /ws/relay  → relayUpstreamUrl → hbbr
-    // Gateway 路由在 Console 的 HTTP 端口上（默认 21114，被反代到 443），
-    // 所以这里不能写 hbbs 原生端口 21118/21119——那是 upstream 用的。
     const consolePublicUrl = process.env.CONSOLE_PUBLIC_URL?.trim();
+
+    // 从 origin / consoleUrl 推导公网 host:port
     let serverHost: string;
     let serverPort: string | undefined;
     if (consolePublicUrl) {
-      // 用户显式指定，如 https://rustdesk.yourdomain.com 或 https://host:21114
       try {
         const u = new URL(consolePublicUrl);
         serverHost = u.hostname;
@@ -347,7 +299,6 @@ export class DatabaseInitService implements OnModuleInit {
         serverHost = consolePublicUrl.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
       }
     } else if (allowedOrigin) {
-      // 从 WEB_CLIENT_ORIGIN=https://rustdesk.yourdomain.com 推导
       try {
         const u = new URL(allowedOrigin);
         serverHost = u.hostname;
@@ -356,35 +307,136 @@ export class DatabaseInitService implements OnModuleInit {
         serverHost = allowedOrigin.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
       }
     } else {
-      // 没有反代域名，用探测到的 PUBLIC_HOST + Console 端口（默认 21114）
+      // 没有反代域名 → 用探测到的 PUBLIC_HOST + Console 端口
       serverHost =
         process.env.PUBLIC_HOST?.trim() ||
-        process.env.RUSTDESK_RELAY_ADDRESS?.trim()?.split(':')[0] ||
         'console.local';
       const consolePort = process.env.PORT?.trim() || '21114';
       serverPort = consolePort;
     }
-    const serverUrlBase = serverPort ? `${serverHost}:${serverPort}` : serverHost;
 
+    // 决定 WSS vs WS：
+    //   origin 以 https:// 开头 → wss://
+    //   origin 以 http:// 开头 → ws://（混合内容阻止）
+    //   没有 origin 也没有 consolePublicUrl → ws://（裸 IP 场景）
+    let wsProtocol: 'wss:' | 'ws:';
+    let enableWebClient: boolean;
+    if (allowedOrigin?.startsWith('https://')) {
+      wsProtocol = 'wss:';
+      enableWebClient = true;
+    } else if (allowedOrigin?.startsWith('http://')) {
+      wsProtocol = 'ws:';
+      enableWebClient = true;
+      this.logger.warn(
+        '[AIO] Web Client using HTTP origin — secure WSS is unavailable over HTTP pages. ' +
+          'This is acceptable for trusted LAN deployments.',
+      );
+    } else if (consolePublicUrl?.startsWith('https://')) {
+      wsProtocol = 'wss:';
+      enableWebClient = true;
+    } else {
+      wsProtocol = 'ws:';
+      // 完全没有 origin 配置 → 内网裸 IP 场景：也尝试启用（serverUrl 用 ws://）
+      enableWebClient = true;
+      this.logger.log(
+        '[AIO] No explicit origin configured; Web Client will use ws:// with bare IP.',
+      );
+    }
+
+    const serverUrlBase = serverPort ? `${serverHost}:${serverPort}` : serverHost;
+    const idServerUrl = `${wsProtocol}//${serverUrlBase}/ws/id`;
+    const relayServerUrl = `${wsProtocol}//${serverUrlBase}/ws/relay`;
+
+    // ---- 2. 尝试读 hbbs 公钥（最多等 60 秒） ----
+    let publicKey: string | undefined;
+    const findPublicKey = async (): Promise<string | undefined> => {
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        if (existsSync(publicKeyPath)) {
+          const content = readFileSync(publicKeyPath, 'utf8').trim();
+          const match = content.match(/^ssh-ed25519\s+([A-Za-z0-9+/=]+)/);
+          if (match) {
+            const blob = Buffer.from(match[1], 'base64');
+            const keytypeLen = blob.readUInt32BE(0);
+            const pubkeyLen = blob.readUInt32BE(4 + keytypeLen);
+            const pubkeyStart = 4 + keytypeLen + 4;
+            const rawPubkey = blob.slice(pubkeyStart, pubkeyStart + pubkeyLen);
+            if (rawPubkey.length === 32) {
+              return rawPubkey.toString('base64');
+            }
+          }
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      return undefined;
+    };
+
+    publicKey = await findPublicKey();
+
+    if (!publicKey) {
+      this.logger.warn(
+        `[AIO] hbbs public key not found at ${publicKeyPath} within 60s. ` +
+          'Will retry in background (hbbs may still be initializing).',
+      );
+      // 定时重检：每 30s 试一次，最多 40 次（~20 分钟）
+      // 用 setInterval 不阻塞启动；成功后写入 settings 并自动启用 Gateway
+      let retries = 0;
+      const MAX_RETRIES = 40;
+      const retryTimer = setInterval(async () => {
+        retries += 1;
+        const pk = await findPublicKey();
+        if (pk) {
+          clearInterval(retryTimer);
+          this.logger.log(
+            `[AIO] Retry #${retries}: hbbs public key recovered. Writing Web Client settings.`,
+          );
+          await this._writeWebClientSettings(
+            pk, idServerUrl, relayServerUrl, allowedOrigin,
+            enableWebClient, category,
+          );
+        } else if (retries >= MAX_RETRIES) {
+          clearInterval(retryTimer);
+          this.logger.error(
+            `[AIO] hbbs public key still unavailable after ${MAX_RETRIES} retries. ` +
+              'Web Client auto-bootstrap aborted. Fix hbbs container and restart Console.',
+          );
+        }
+      }, 30_000);
+      return;
+    }
+
+    // ---- 3. 写入 settings ----
+    await this._writeWebClientSettings(
+      publicKey, idServerUrl, relayServerUrl, allowedOrigin,
+      enableWebClient, category,
+    );
+  }
+
+  /**
+   * 幂等写入 Web Client settings。只写不存在的 key，不覆盖管理员修改。
+   */
+  private async _writeWebClientSettings(
+    publicKey: string,
+    idServerUrl: string,
+    relayServerUrl: string,
+    allowedOrigin: string | undefined,
+    enableWebClient: boolean,
+    category: string,
+  ): Promise<void> {
     const pairs: Array<[string, string, boolean]> = [
-      // 外部公开 WebSocket —— 浏览器连 Gateway 路由
-      ['webClient.idServerUrl', `wss://${serverUrlBase}/ws/id`, false],
-      ['webClient.relayServerUrl', `wss://${serverUrlBase}/ws/relay`, false],
-      // 服务器公钥（OpenSSH ed25519 → 裸 32 字节 → base64）
+      ['webClient.idServerUrl', idServerUrl, false],
+      ['webClient.relayServerUrl', relayServerUrl, false],
       ['webClient.serverPublicKey', publicKey, true],
-      // 内部直连 —— Console Gateway 绕过网络直接进 hbbs/hbbr 原生 WS
       ['webClient.idUpstreamUrl', 'ws://hbbs:21118', false],
       ['webClient.relayUpstreamUrl', 'ws://hbbr:21119', false],
-      // 启用开关（只有 HTTPS origin 才自动启用）
       ['webClient.enabled', String(enableWebClient), false],
     ];
-
     if (allowedOrigin) {
       pairs.push(['webClient.allowedOrigin', allowedOrigin, false]);
     }
 
     let applied = 0;
-    for (const [key, value] of pairs) {
+    for (const [key, value, isSensitive] of pairs) {
       const existing = await this.systemSettingRepository.findOne({
         where: { key },
       });
@@ -395,7 +447,7 @@ export class DatabaseInitService implements OnModuleInit {
           value,
           category,
           description: `Auto-bootstrapped by DatabaseInitService (AIO)`,
-          isSensitive: key.includes('PublicKey'),
+          isSensitive,
         }),
       );
       applied += 1;
@@ -404,12 +456,11 @@ export class DatabaseInitService implements OnModuleInit {
     if (applied > 0) {
       if (enableWebClient) {
         this.logger.log(
-          `[AIO] Web Client enabled and auto-configured (${applied} setting(s))`,
+          `[AIO] Web Client auto-configured (${applied} setting(s)) — ENABLED`,
         );
       } else {
         this.logger.log(
-          `[AIO] Web Client skeleton configured (${applied} setting(s)); ` +
-            `disabled — provide WEB_CLIENT_ORIGIN=https://... to enable`,
+          `[AIO] Web Client skeleton configured (${applied} setting(s)); disabled.`,
         );
       }
     }
