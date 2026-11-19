@@ -80,6 +80,7 @@ jobs:
             SOURCE_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: ${{ steps.setup.outputs.push == 'true' && 'type=registry' || 'type=docker' }}
 
       - name: Save artifact (no push)
         if: steps.setup.outputs.push != 'true'
