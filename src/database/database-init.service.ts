@@ -2,6 +2,8 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Like, QueryFailedError, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import { User, UserStatus } from '../modules/user/entities/user.entity';
 import { OidcProvider } from '../modules/oidc/entities/oidc-provider.entity';
@@ -71,6 +73,7 @@ export class DatabaseInitService implements OnModuleInit {
     await this.cleanupUnusedDefaultOidcProviders();
     await this.cleanupExpiredAuthStates();
     await this.bootstrapServerManagementFromEnv();
+    await this.bootstrapWebClientFromEnv();
   }
 
   /**
@@ -250,6 +253,120 @@ export class DatabaseInitService implements OnModuleInit {
       this.logger.log(
         `Server management auto-bootstrapped ${applied} setting(s) from environment variables`,
       );
+    }
+  }
+
+  /**
+   * Bootstrap Web Client settings for All-in-One setups.
+   *
+   * 在 All-in-One 里 Console、hbbs、hbbr 三个容器共享宿主机目录 ./data，
+   * 所以 Console 能直接从 /data/server/id_ed25519.pub 读取 hbbs 自动生成的公钥。
+   * 同时结合环境变量 PUBLIC_HOST 构造出外部 WSS 地址和内部直连 upstream。
+   *
+   * allowedOrigin 必须是完整 HTTPS origin，后端校验强制 https:。
+   * 因此只有用户显式提供了 WEB_CLIENT_ORIGIN=https://... 时才会把 enabled 置为 true；
+   * 其他字段（upstream、公钥、WSS 地址）仍然写入，等用户后续配好 HTTPS 只需改两处。
+   *
+   * 写入原则：只在对应 key 不存在时写入，不覆盖管理员的手动修改。
+   */
+  private async bootstrapWebClientFromEnv(): Promise<void> {
+    const category = 'webClient';
+    const dataDir = process.env.DATA_DIR || '/data';
+    const serverDir = resolve(dataDir, 'server');
+    const publicKeyPath = resolve(serverDir, 'id_ed25519.pub');
+
+    // Fast path: hbbs 容器没跑 / 数据目录为空 → 根本不会有公钥，
+    // 直接 skip 避免单元测试或普通部署里白等 60 秒。
+    if (!existsSync(serverDir)) {
+      this.logger.debug(
+        `[AIO] hbbs data dir not found at ${serverDir}; skipping Web Client auto-bootstrap`,
+      );
+      return;
+    }
+
+    // Poll only when the directory exists (hbbs 数据已挂载) but the key file has not appeared yet.
+    let publicKey: string | undefined;
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      if (existsSync(publicKeyPath)) {
+        const content = readFileSync(publicKeyPath, 'utf8').trim();
+        const match = content.match(/^ssh-ed25519\s+([A-Za-z0-9+/=]+)/);
+        if (match) {
+          publicKey = match[1];
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+
+    if (!publicKey) {
+      this.logger.warn(
+        `[AIO] hbbs public key not found at ${publicKeyPath} within 60s; ` +
+          'skipping Web Client auto-bootstrap (hbbs may still be starting).',
+      );
+      return;
+    }
+
+    const publicHost =
+      process.env.PUBLIC_HOST?.trim() ||
+      process.env.RUSTDESK_RELAY_ADDRESS?.trim()?.split(':')[0];
+    const relayAddress =
+      process.env.RUSTDESK_RELAY_ADDRESS?.trim() || 'relay-placeholder:21117';
+    // relayAddress 形如 host:port，id 端口是 host:21118
+    const relayHost = relayAddress.split(':')[0];
+    const wssIdHost = `${relayHost}:21118`;
+    const wssRelayHost = `${relayHost}:21119`;
+
+    const allowedOrigin = process.env.WEB_CLIENT_ORIGIN?.trim();
+    const enableWebClient =
+      !!allowedOrigin && allowedOrigin.startsWith('https://');
+
+    const pairs: Array<[string, string, boolean]> = [
+      // 外部公开 WebSocket（浏览器实际连接）
+      ['webClient.idServerUrl', `wss://${wssIdHost}/ws`, false],
+      ['webClient.relayServerUrl', `wss://${wssRelayHost}/ws`, false],
+      // 服务器公钥（从 hbbs 读出来的）
+      ['webClient.serverPublicKey', publicKey, true],
+      // 内部直连（让 Console Gateway 绕过公网直接连 hbbs/hbbr）
+      ['webClient.idUpstreamUrl', 'ws://hbbs:21118/ws/id', false],
+      ['webClient.relayUpstreamUrl', 'ws://hbbr:21119/ws/relay', false],
+      // 启用开关（只有用户提供 HTTPS origin 时才启用）
+      ['webClient.enabled', String(enableWebClient), false],
+    ];
+
+    if (allowedOrigin) {
+      pairs.push(['webClient.allowedOrigin', allowedOrigin, false]);
+    }
+
+    let applied = 0;
+    for (const [key, value] of pairs) {
+      const existing = await this.systemSettingRepository.findOne({
+        where: { key },
+      });
+      if (existing) continue;
+      await this.systemSettingRepository.save(
+        this.systemSettingRepository.create({
+          key,
+          value,
+          category,
+          description: `Auto-bootstrapped by DatabaseInitService (AIO)`,
+          isSensitive: key.includes('PublicKey'),
+        }),
+      );
+      applied += 1;
+    }
+
+    if (applied > 0) {
+      if (enableWebClient) {
+        this.logger.log(
+          `[AIO] Web Client enabled and auto-configured (${applied} setting(s))`,
+        );
+      } else {
+        this.logger.log(
+          `[AIO] Web Client skeleton configured (${applied} setting(s)); ` +
+            `disabled — provide WEB_CLIENT_ORIGIN=https://... to enable`,
+        );
+      }
     }
   }
 }

@@ -52,6 +52,13 @@ services:
       SERVER_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN:-}
       SERVER_MANAGEMENT_NODE_ID: ${SERVER_MANAGEMENT_NODE_ID:-rustdesk}
       SERVER_MANAGEMENT_NODE_NAME: ${SERVER_MANAGEMENT_NODE_NAME:-RustDesk}
+      # —— Web Client（网页远控）自动配置 ——
+      # Console 后端会自动等待 hbbs 起来读公钥并填好 upstream URL；
+      # 提供了 WEB_CLIENT_ORIGIN=https://... 时会自动启用网页远控。
+      DATA_DIR: ${CONSOLE_DATA_DIR:-/data}
+      PUBLIC_HOST: ${PUBLIC_HOST:-}
+      RUSTDESK_RELAY_ADDRESS: ${RUSTDESK_RELAY_ADDRESS:-}
+      WEB_CLIENT_ORIGIN: ${WEB_CLIENT_ORIGIN:-}
     volumes:
       - ${CONSOLE_DATA_DIR:-./data}:/data
     networks:
