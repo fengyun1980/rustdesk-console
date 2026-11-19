@@ -2,6 +2,10 @@
 jest.mock('../settings/services/general-settings.service', () => ({}));
 jest.mock('../web-client/web-client-settings.service', () => ({}));
 jest.mock('../web-client/web-client.service', () => ({}));
+jest.mock('../server-management/server-management-settings.service', () => ({
+  DEFAULT_NODE_ID: 'rustdesk',
+  DEFAULT_NODE_NAME: 'RustDesk',
+}));
 
 import { ConflictException, BadRequestException } from '@nestjs/common';
 import { SetupService } from './setup.service';
@@ -19,6 +23,7 @@ describe('SetupService', () => {
   let mockGeneralSettings: any;
   let mockWebClientSettings: any;
   let mockWebClient: any;
+  let mockServerManagementSettings: any;
   let mockUserRepo: any;
 
   const adminUser = {
@@ -36,6 +41,7 @@ describe('SetupService', () => {
     };
     mockWebClientSettings = { updateSettings: jest.fn() };
     mockWebClient = { refresh: jest.fn() };
+    mockServerManagementSettings = { updateSettings: jest.fn() };
     mockUserRepo = {
       findOne: jest.fn(),
       save: jest.fn(),
@@ -47,6 +53,7 @@ describe('SetupService', () => {
       mockGeneralSettings,
       mockWebClientSettings,
       mockWebClient,
+      mockServerManagementSettings,
       mockUserRepo,
     );
   };
@@ -100,6 +107,8 @@ describe('SetupService', () => {
       service.complete({ serverUrl: 'https://another.example.com', adminUsername: 'admin', adminPassword: 'admin123' }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
+    expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();
+    expect(mockServerManagementSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockUserRepo.save).not.toHaveBeenCalled();
   });
 
@@ -119,6 +128,8 @@ describe('SetupService', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     }
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
+    expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();
+    expect(mockServerManagementSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockUserRepo.save).not.toHaveBeenCalled();
   });
 
@@ -137,7 +148,11 @@ describe('SetupService', () => {
     expect(result.webClient.idServerUrl).toBe('wss://rdc.tmnas.top/ws/id');
     expect(result.webClient.relayServerUrl).toBe('wss://rdc.tmnas.top/ws/relay');
     expect(result.webClient.allowedOrigin).toBe('https://rdc.tmnas.top');
-    expect(result.warnings).toEqual([]);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'jwt_default_secret' }),
+      ]),
+    );
     expect(result.passwordChanged).toBe(true);
 
     // Admin credentials written
@@ -163,6 +178,18 @@ describe('SetupService', () => {
       }),
     );
     expect(mockWebClient.refresh).toHaveBeenCalled();
+
+    // ServerManagement auto-configured
+    expect(mockServerManagementSettings.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: 'http://rdc.tmnas.top:21120',
+        nodeId: 'rustdesk',
+        nodeName: 'RustDesk',
+      }),
+    );
+    expect(result.serverManagement.url).toBe('http://rdc.tmnas.top:21120');
+    expect(result.serverManagement.tokenConfigured).toBe(true);
+    expect(result.serverManagement.usingDefaultSecret).toBe(true);
   });
 
   // ---------- HTTPS + no key: prefilled but disabled ----------
@@ -219,6 +246,7 @@ describe('SetupService', () => {
 
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();
+    expect(mockServerManagementSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockUserRepo.save).not.toHaveBeenCalled();
   });
 });

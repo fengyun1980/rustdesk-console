@@ -12,8 +12,15 @@ import { UpdateGeneralSettingsDto } from '../settings/dto/general-settings.dto';
 import { WebClientSettingsService } from '../web-client/web-client-settings.service';
 import { UpdateWebClientSettingsDto } from '../web-client/dto/web-client-settings.dto';
 import { WebClientService } from '../web-client/web-client.service';
+import { ServerManagementSettingsService } from '../server-management/server-management-settings.service';
+import { UpdateServerManagementSettingsDto } from '../server-management/dto/server-management-settings.dto';
+import { DEFAULT_NODE_ID, DEFAULT_NODE_NAME } from '../server-management/server-management-settings.service';
+import { JWT_DEFAULT_SECRET } from '../auth/auth.constants';
 import { User } from '../user/entities/user.entity';
 import { CompleteSetupDto } from './dto/complete-setup.dto';
+
+/** hbbs management API port (Server Pro default) */
+const HBBS_MANAGEMENT_PORT = 21120;
 
 export interface SetupStatus {
   completed: boolean;
@@ -34,6 +41,13 @@ export interface SetupCompletionResult {
     relayServerUrl?: string;
     allowedOrigin?: string;
   };
+  serverManagement: {
+    url: string;
+    tokenConfigured: boolean;
+    usingDefaultSecret: boolean;
+    nodeId: string;
+    nodeName: string;
+  };
   passwordChanged: boolean;
   warnings: SetupCompletionWarning[];
 }
@@ -51,6 +65,7 @@ export class SetupService {
     private readonly generalSettingsService: GeneralSettingsService,
     private readonly webClientSettingsService: WebClientSettingsService,
     private readonly webClientService: WebClientService,
+    private readonly serverManagementSettingsService: ServerManagementSettingsService,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
   ) {}
@@ -195,8 +210,39 @@ export class SetupService {
       await this.webClientService.refresh();
     }
 
+    // ---- Auto-configure hbbs management API (ServerManagement) ----
+    // Console and hbbs share one JWT_SECRET in integrated deployments, so the
+    // hbbs management API Bearer token is just our JWT secret. The management
+    // API port is Server Pro default 21120; host follows the console origin.
+    const jwtSecret = process.env.JWT_SECRET || JWT_DEFAULT_SECRET;
+    const usingDefaultSecret = !process.env.JWT_SECRET;
+    const managementUrl = `http://${parsed.host}:${HBBS_MANAGEMENT_PORT}`;
+    const smUpdate: UpdateServerManagementSettingsDto = {
+      url: managementUrl,
+      token: jwtSecret,
+      nodeId: DEFAULT_NODE_ID,
+      nodeName: DEFAULT_NODE_NAME,
+    };
+    let smConfigured = true;
+    try {
+      await this.serverManagementSettingsService.updateSettings(smUpdate);
+    } catch (error) {
+      smConfigured = false;
+      warnings.push({
+        code: 'server_management_config_failed',
+        message: `Auto-configure hbbs management API failed: ${String(error)}. Configure it manually in "Settings → Server Management".`,
+      });
+    }
+    if (smConfigured && usingDefaultSecret) {
+      warnings.push({
+        code: 'jwt_default_secret',
+        message:
+          'JWT_SECRET is not set — using the default development secret. Set it via environment variable in production.',
+      });
+    }
+
     this.logger.log(
-      `Setup wizard completed. origin=${origin}, webClientEnabled=${webClientEnabled}, passwordChanged=${passwordChanged}`,
+      `Setup wizard completed. origin=${origin}, webClientEnabled=${webClientEnabled}, serverManagementConfigured=${smConfigured}, usingDefaultSecret=${usingDefaultSecret}, passwordChanged=${passwordChanged}`,
     );
 
     const result: SetupCompletionResult = {
@@ -205,6 +251,13 @@ export class SetupService {
       webClient: {
         eligible: webClientEligible,
         enabled: webClientEnabled,
+      },
+      serverManagement: {
+        url: managementUrl,
+        tokenConfigured: smConfigured,
+        usingDefaultSecret,
+        nodeId: DEFAULT_NODE_ID,
+        nodeName: DEFAULT_NODE_NAME,
       },
       passwordChanged,
       warnings,
