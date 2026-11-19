@@ -35,46 +35,56 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # metadata-action v5 — tags 格式：
-      #   type=sha              → ghcr.io/org/repo:sha-xxxxxxxxxxxx
-      #   type=ref,event=branch → 自动匹配 branch push，value=branch 名
-      #   type=ref,event=tag    → 自动匹配 tag push
-      #   type=raw              → 自定义 tag
-      #   type=semver           → 自动匹配 v* tag
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,prefix=sha-
-            type=ref,event=branch
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-
-      - name: Override aio tag for trae branch
-        id: final-tags
+      - name: Compute tags
+        id: tags
         run: |
-          CURRENT_TAGS="${{ steps.meta.outputs.tags }}"
-          if [ "${{ github.ref }}" = "refs/heads/trae/agent-0sKjvb" ]; then
-            CURRENT_TAGS="${CURRENT_TAGS}
-ghcr.io/${{ github.repository }}:aio"
+          IMAGE="ghcr.io/${{ github.repository }}"
+          SHA7="${GITHUB_SHA::7}"
+          TAGS_LIST="
+            ${IMAGE}:sha-${SHA7}
+          "
+          REF="${GITHUB_REF}"
+          if [ "$REF" = "refs/heads/main" ]; then
+            TAGS_LIST="
+              ${TAGS_LIST}
+              ${IMAGE}:latest
+              ${IMAGE}:main
+            "
           fi
-          # 去重、去空行
-          CURRENT_TAGS=$(echo "$CURRENT_TAGS" | sed '/^$/d' | sort -u)
-          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CURRENT_TAGS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          echo "=== Final tags ==="
-          echo "$CURRENT_TAGS"
+          if [ "$REF" = "refs/heads/trae/agent-0sKjvb" ]; then
+            TAGS_LIST="
+              ${TAGS_LIST}
+              ${IMAGE}:aio
+            "
+          fi
+          case "$REF" in
+            refs/tags/v*)
+              VER="${GITHUB_REF_NAME#v}"
+              MINOR="${VER%.*}"
+              TAGS_LIST="
+                ${TAGS_LIST}
+                ${IMAGE}:${VER}
+                ${IMAGE}:${MINOR}
+                ${IMAGE}:latest
+              "
+              ;;
+          esac
+          # 清理：去空行去重
+          CLEAN=$(echo "$TAGS_LIST" | sed '/^[[:space:]]*$/d' | sed 's/^[[:space:]]*//' | sort -u)
+          {
+            echo "tags<<GHAEOF"
+            echo "$CLEAN"
+            echo "GHAEOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "=== Will push these tags ==="
+          echo "$CLEAN"
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.final-tags.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             APP_VERSION=${{ github.ref_name }}
             SOURCE_COMMIT=${{ github.sha }}
