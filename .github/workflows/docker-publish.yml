@@ -36,49 +36,51 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build image
+      # 先构建到本地（不 push），拿到 digest
+      - uses: docker/build-push-action@v6
         id: build
-        uses: docker/build-push-action@v6
         with:
           context: .
           push: false
-          platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/${{ github.repository }}:build
+          tags: ghcr.io/${{ github.repository }}:buildcache
           build-args: |
             APP_VERSION=${{ github.ref_name }}
             SOURCE_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Push main branch tags
-        if: github.ref == 'refs/heads/main'
+      # 用 buildx build --push 一次性推送所有需要的 tag
+      - name: Push to GHCR
         run: |
           set -ex
           IMAGE=ghcr.io/${{ github.repository }}
-          docker buildx imagetools push "$IMAGE:build"
-          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:build"
-          docker buildx imagetools create -t "$IMAGE:sha-${GITHUB_SHA::7}" "$IMAGE:build"
+          SHA_SHORT=${GITHUB_SHA::7}
 
-      - name: Push AIO branch tags
-        if: github.ref == 'refs/heads/trae/agent-0sKjvb'
-        run: |
-          set -ex
-          IMAGE=ghcr.io/${{ github.repository }}
-          docker buildx imagetools push "$IMAGE:build"
-          docker buildx imagetools create -t "$IMAGE:aio" "$IMAGE:build"
-          docker buildx imagetools create -t "$IMAGE:sha-${GITHUB_SHA::7}" "$IMAGE:build"
+          TAGS=()
+          TAGS+=("--tag" "${IMAGE}:sha-${SHA_SHORT}")
 
-      - name: Push version tag (v*)
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          set -ex
-          IMAGE=ghcr.io/${{ github.repository }}
-          docker buildx imagetools push "$IMAGE:build"
-          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:build"
-          docker buildx imagetools create -t "$IMAGE:${GITHUB_REF_NAME#v}" "$IMAGE:build"
-          docker buildx imagetools create -t "$IMAGE:sha-${GITHUB_SHA::7}" "$IMAGE:build"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS+=("--tag" "${IMAGE}:latest")
+            TAGS+=("--tag" "${IMAGE}:main")
+          fi
 
-      - name: Clean up temp tag
-        run: |
-          IMAGE=ghcr.io/${{ github.repository }}
-          docker buildx imagetools rm "$IMAGE:build" || true
+          if [ "${GITHUB_REF}" = "refs/heads/trae/agent-0sKjvb" ]; then
+            TAGS+=("--tag" "${IMAGE}:aio")
+          fi
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TAGS+=("--tag" "${IMAGE}:latest")
+            TAGS+=("--tag" "${IMAGE}:${VERSION}")
+            MINOR="${VERSION%.*}"
+            TAGS+=("--tag" "${IMAGE}:${MINOR}")
+          fi
+
+          # 用 buildx 重新 build 并 push（多架构 + 多 tag）
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            "${TAGS[@]}" \
+            --build-arg "APP_VERSION=${GITHUB_REF_NAME}" \
+            --build-arg "SOURCE_COMMIT=${GITHUB_SHA}" \
+            --push \
+            .
