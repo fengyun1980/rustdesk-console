@@ -35,38 +35,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate tags
+      # Step 5: 用 metadata-action 生成 tag 字符串
+      # main 分支 → latest + main + sha-xxxxxxx
+      # trae/agent → aio + sha-xxxxxxx
+      # tag v*    → latest + 版本号 + 主版本号 + sha-xxxxxxx
+      - uses: docker/metadata-action@v5
         id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=aio,enable={{branch == 'trae/agent-0sKjvb'}}
+            type=semver,pattern={{version}},enable={{startsWith(github.ref, 'refs/tags/v')}}
+            type=semver,pattern={{major}}.{{minor}},enable={{startsWith(github.ref, 'refs/tags/v')}}
+
+      - name: Show tags
         run: |
-          IMAGE="ghcr.io/${{ github.repository }}"
-          SHA_SHORT="${GITHUB_SHA::7}"
-          TAGS="${IMAGE}:sha-${SHA_SHORT}"
-
-          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            TAGS="${TAGS}
-${IMAGE}:latest
-${IMAGE}:main"
-          fi
-
-          if [ "${GITHUB_REF}" = "refs/heads/trae/agent-0sKjvb" ]; then
-            TAGS="${TAGS}
-${IMAGE}:aio"
-          fi
-
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-            MINOR="${VERSION%.*}"
-            TAGS="${TAGS}
-${IMAGE}:latest
-${IMAGE}:${VERSION}
-${IMAGE}:${MINOR}"
-          fi
-
-          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$TAGS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          echo "=== Will push these tags ==="
-          echo "$TAGS"
+          echo "=== Will push ==="
+          echo '${{ steps.meta.outputs.tags }}'
+          echo "=== Labels ==="
+          echo '${{ steps.meta.outputs.labels }}'
 
       - uses: docker/build-push-action@v6
         with:
@@ -74,6 +64,7 @@ ${IMAGE}:${MINOR}"
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             APP_VERSION=${{ github.ref_name }}
             SOURCE_COMMIT=${{ github.sha }}
