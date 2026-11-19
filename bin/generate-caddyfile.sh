@@ -50,18 +50,41 @@ if [ -z "$CADDY_DOMAIN" ]; then
   CERT="$CERTS_DIR/server.crt"
   KEY="$CERTS_DIR/server.key"
 
-  if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
+  # 强制重建开关（aio-up.sh 或 fix-caddy.sh 可用）
+  FORCE_REGEN="${FORCE_REGEN_CERTS:-}"
+
+  # 计算当前应有的 SAN
+  SAN="DNS:localhost"
+  [ -n "$CADDY_IP" ] && SAN="IP:$CADDY_IP,DNS:localhost"
+
+  NEED_REGEN=0
+  if [ -z "$FORCE_REGEN" ] && [ -f "$CERT" ] && [ -f "$KEY" ]; then
+    # 检查现有证书的 SAN 是否匹配
+    EXISTING_SAN=$(openssl x509 -in "$CERT" -noout -ext subjectAltName 2>/dev/null | tr -d '\n ' || echo "")
+    EXPECTED_SAN="subjectAltName=DNS:localhost"
+    [ -n "$CADDY_IP" ] && EXPECTED_SAN="subjectAltName=IP:${CADDY_IP},DNS:localhost"
+
+    if echo "$EXISTING_SAN" | grep -qF "${CADDY_IP}"; then
+      echo "✓ 复用已有自签证书（SAN 匹配）：$CERT"
+    else
+      echo "⚠ 已有证书 SAN 不匹配（期望包含 ${CADDY_IP:-localhost}），强制重建"
+      NEED_REGEN=1
+    fi
+  else
+    NEED_REGEN=1
+  fi
+
+  if [ "$NEED_REGEN" -eq 1 ]; then
+    rm -f "$CERT" "$KEY"
     echo "✓ 生成 openssl 自签证书（裸 IP 场景）..."
-    SAN="DNS:localhost"
-    [ -n "$CADDY_IP" ] && SAN="IP:$CADDY_IP,DNS:localhost"
+    echo "  SAN: $SAN"
     openssl req -x509 -newkey rsa:2048 \
       -keyout "$KEY" -out "$CERT" \
       -days 3650 -nodes \
       -subj "/CN=RustDesk Console" \
       -addext "subjectAltName=$SAN" 2>/dev/null
-    echo "  证书：$CERT"
-  else
-    echo "✓ 复用已有自签证书：$CERT"
+    echo "  ✓ 证书：$CERT"
+    openssl x509 -in "$CERT" -noout -subject -dates 2>/dev/null || true
   fi
 fi
 
