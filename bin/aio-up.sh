@@ -149,7 +149,7 @@ if [ -z "${CONSOLE_PUBLIC_URL:-}" ]; then
     CONSOLE_PUBLIC_URL="https://$CLEAN"
   elif [ -n "${PUBLIC_HOST:-}" ]; then
     # 裸 IP + Caddy 自签 HTTPS（443）
-    CONSOLE_PUBLIC_URL="https://${PUBLIC_HOST}:${CADDY_HTTPS_PORT:-443}"
+    CONSOLE_PUBLIC_URL="https://${PUBLIC_HOST}:${CADDY_HTTPS_PORT:-4443}"
   else
     CONSOLE_PUBLIC_URL="http://console.local:${CADDY_HTTP_PORT:-80}"
   fi
