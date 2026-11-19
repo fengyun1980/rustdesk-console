@@ -1,0 +1,242 @@
+name: fnOS Build (FPK)
+
+# Triggers:
+#   1. A tag fnos-* is pushed (automated release)
+#   2. Manual dispatch with inputs (tag + version)
+on:
+  push:
+    tags:
+      - 'fnos-*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'FPK 版本号 (e.g. 1.11.10)'
+        required: true
+        type: string
+      frontend_repo:
+        description: '前端仓库 (owner/repo)'
+        required: true
+        default: 'fengyun1980/rustdesk-console-web'
+        type: string
+      frontend_branch:
+        description: '前端分支/tag'
+        required: true
+        default: 'fnos-setup-wizard'
+        type: string
+      publish:
+        description: '构建后发布到 Release 吗？'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  FN_PACK_VERSION: '1.3.3'
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # 1. 构建后端 (NestJS dist + 生产依赖)
+  # ──────────────────────────────────────────────────────────────────
+  backend-build:
+    name: Build Backend
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_version: ${{ steps.meta.outputs.artifact_version }}
+    steps:
+      - name: Checkout backend repo
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Determine version
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "$TAG" == fnos-* ]]; then
+            VERSION="${TAG#fnos-}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "artifact_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install + Build backend
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          echo "✓ backend dist ready"
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v8
+        with:
+          name: rustdesk-console-backend
+          path: |
+            dist
+            package.json
+            package-lock.json
+            tsconfig*.json
+            nest-cli.json
+            Dockerfile
+            deployment/network/tcp-observation.js
+            deployment/compose-bootstrap.mjs
+            deployment/docker-entrypoint.sh
+
+  # ──────────────────────────────────────────────────────────────────
+  # 2. 构建前端 (React → 静态站点)
+  # ──────────────────────────────────────────────────────────────────
+  frontend-build:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_version: ${{ steps.meta.outputs.artifact_version }}
+    steps:
+      - name: Checkout frontend repo
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.event_name == 'workflow_dispatch' && inputs.frontend_repo || 'fengyun1980/rustdesk-console-web' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.frontend_branch || 'fnos-setup-wizard' }}
+          path: frontend
+
+      - name: Determine version
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "$TAG" == fnos-* ]]; then
+            VERSION="${TAG#fnos-}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "artifact_version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install + Build frontend
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          echo "✓ frontend dist ready ($(ls dist | head -1))"
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v8
+        with:
+          name: rustdesk-console-frontend
+          path: frontend/dist
+
+  # ──────────────────────────────────────────────────────────────────
+  # 3. fnpack 组装 + 打 FPK
+  # ──────────────────────────────────────────────────────────────────
+  fpk-build:
+    name: Build fnOS FPK
+    needs: [backend-build, frontend-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine version
+        run: |
+          VERSION="${{ needs.backend-build.outputs.artifact_version }}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Checkout backend (for fnOS manifests + scripts)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Assemble FPK workspace
+        run: |
+          set -euo pipefail
+          FPACK_DIR="fnos/.fnpkg"
+          mkdir -p "$FPACK_DIR"
+          cp -r fnos/* "$FPACK_DIR/"
+
+          # 前端静态资源 → fnOS Docker 构建上下文
+          mkdir -p "$FPACK_DIR/app/docker/web-dist"
+          cp -r artifacts/rustdesk-console-frontend/* "$FPACK_DIR/app/docker/web-dist/"
+
+          # 后端源码 (给 Dockerfile 用 — 因为 fnOS fnpack 会把 app/docker 一起打包)
+          # 但 Dockerfile.fnos 会在 fnOS 设备上再次 npm ci + build —— 为了加速，
+          # 我们也可以预构建 dist 放进去。这里两种方式都支持：
+          mkdir -p "$FPACK_DIR/app/docker/backend-src"
+          cp -r artifacts/rustdesk-console-backend/* "$FPACK_DIR/app/docker/backend-src/"
+
+          # 更新 manifest 版本号
+          cp "$FPACK_DIR/manifest" "$FPACK_DIR/manifest.bak"
+          sed "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" \
+              "$FPACK_DIR/manifest.bak" > "$FPACK_DIR/manifest"
+          rm "$FPACK_DIR/manifest.bak"
+
+          echo "=== fnOS FPK workspace ==="
+          find "$FPACK_DIR" -type f | sort
+
+      - name: Download fnpack CLI
+        run: |
+          curl -fsSL "https://static2.fnnas.com/fnpack/fnpack-${FN_PACK_VERSION}-linux-amd64" -o fnpack
+          chmod +x fnpack
+          ./fnpack --version || true
+
+      - name: Build .fpk
+        env:
+          FNOS_DEV_CERT: ${{ secrets.FNOS_DEV_CERT }}
+          FNOS_DEV_KEY: ${{ secrets.FNOS_DEV_KEY }}
+        run: |
+          if [ -n "$FNOS_DEV_CERT" ] && [ -n "$FNOS_DEV_KEY" ]; then
+            echo "→ Signing with developer certificate from repository secrets"
+            ./fnpack build \
+              --directory fnos/.fnpkg \
+              --cert <(echo "$FNOS_DEV_CERT" | base64 -d) \
+              --key  <(echo "$FNOS_DEV_KEY"  | base64 -d)
+          else
+            echo "⚠️  FNOS_DEV_CERT / FNOS_DEV_KEY not configured — building UNSIGNED package"
+            echo "   Configure them in repository Settings → Secrets and variables → Actions"
+            ./fnpack build --directory fnos/.fnpkg --nosign
+          fi
+          ls -la fnos/.fnpkg/*.fpk
+          echo "FPK=$(ls fnos/.fnpkg/*.fpk | head -1)" >> "$GITHUB_ENV"
+
+      - name: Upload FPK artifact
+        uses: actions/upload-artifact@v8
+        with:
+          name: rustdesk-console-fpk
+          path: fnos/.fnpkg/*.fpk
+
+      - name: Upload to Release
+        if: ${{ (inputs.publish == true) || (github.event_name == 'push') }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: fnOS FPK ${{ env.VERSION }}
+          body: |
+            ## RustDesk Console · fnOS FPK v${{ env.VERSION }}
+
+            ### 包含
+            - **后端**: `fengyun1980/rustdesk-console` @ ${{ github.sha }}
+            - **前端**: ${{ github.event_name == 'workflow_dispatch' && inputs.frontend_repo || 'fengyun1980/rustdesk-console-web' }} @ ${{ github.event_name == 'workflow_dispatch' && inputs.frontend_branch || 'fnos-setup-wizard' }}
+            - **Setup Wizard**: 首次安装进入 `/setup`，一处填写 serverUrl + admin 账号，系统自动配置
+            - **ServerManagement**: 自动填充 hbbs `http://host:21120` + JWT_SECRET token
+            - **Web Client**: 自动派生 wss:// host + 自动从 hbbs /v1/status 拉 Ed25519 公钥
+
+            ### 安装前准备
+            - fnOS ≥ 2.0
+            - Docker CE 已启用
+            - 开放端口: 8000 (Web), 3000 (API)
+          files: |
+            fnos/.fnpkg/*.fpk
+          fail_on_unmatched_files: true
