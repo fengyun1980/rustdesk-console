@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { User, UserStatus } from '../modules/user/entities/user.entity';
 import { OidcProvider } from '../modules/oidc/entities/oidc-provider.entity';
 import { OidcAuthState } from '../modules/oidc/entities/oidc-auth-state.entity';
+import { SystemSetting } from '../modules/settings/entities/system-setting.entity';
 import { UserGroupService } from '../modules/user-group/user-group.service';
 
 @Injectable()
@@ -26,6 +27,8 @@ export class DatabaseInitService implements OnModuleInit {
     private oidcProviderRepository: Repository<OidcProvider>,
     @InjectRepository(OidcAuthState)
     private oidcAuthStateRepository: Repository<OidcAuthState>,
+    @InjectRepository(SystemSetting)
+    private systemSettingRepository: Repository<SystemSetting>,
     private readonly userGroupService: UserGroupService,
     private readonly dataSource: DataSource,
   ) {}
@@ -67,6 +70,7 @@ export class DatabaseInitService implements OnModuleInit {
     await this.createDefaultAdmin(defaultGroup.guid);
     await this.cleanupUnusedDefaultOidcProviders();
     await this.cleanupExpiredAuthStates();
+    await this.bootstrapServerManagementFromEnv();
   }
 
   /**
@@ -177,6 +181,74 @@ export class DatabaseInitService implements OnModuleInit {
 
     if (result.affected && result.affected > 0) {
       this.logger.log(`Cleaned up ${result.affected} expired OIDC auth states`);
+    }
+  }
+
+  /**
+   * Bootstrap server-management and related settings from environment variables.
+   *
+   * This enables "deploy-and-use" all-in-one setups where docker-compose
+   * spins up hbbs/hbbr alongside the console. The values are written only when
+   * the corresponding key is not yet present in system_settings, so an
+   * administrator's later change in Settings is never overwritten on restart.
+   *
+   * Environment variables (all optional):
+   *   SERVER_MANAGEMENT_URL      e.g. http://hbbs:21120
+   *   SERVER_MANAGEMENT_TOKEN    hbbs management token (>= 32 chars)
+   *   SERVER_MANAGEMENT_NODE_ID  defaults to 'rustdesk'
+   *   SERVER_MANAGEMENT_NODE_NAME defaults to 'RustDesk'
+   *
+   *   SITE_URL                   Public URL of this console (optional)
+   */
+  private async bootstrapServerManagementFromEnv() {
+    const url = process.env.SERVER_MANAGEMENT_URL?.trim();
+    const token = process.env.SERVER_MANAGEMENT_TOKEN;
+    if (!url || !token) {
+      // Nothing to bootstrap; this is the normal path for non-AIO deployments.
+      return;
+    }
+    if (token.length < 32) {
+      this.logger.warn(
+        'SERVER_MANAGEMENT_TOKEN must be at least 32 characters; skipping automatic server management bootstrap',
+      );
+      return;
+    }
+
+    const nodeId = process.env.SERVER_MANAGEMENT_NODE_ID?.trim() || 'rustdesk';
+    const nodeName =
+      process.env.SERVER_MANAGEMENT_NODE_NAME?.trim() || 'RustDesk';
+
+    const pairs: Array<[string, string, boolean]> = [
+      ['serverManagement.url', url, false],
+      ['serverManagement.token', token, true],
+      ['serverManagement.nodeId', nodeId, false],
+      ['serverManagement.nodeName', nodeName, false],
+    ];
+
+    let applied = 0;
+    for (const [key, value, isSensitive] of pairs) {
+      const existing = await this.systemSettingRepository.findOne({
+        where: { key },
+      });
+      if (existing) {
+        continue;
+      }
+      await this.systemSettingRepository.save(
+        this.systemSettingRepository.create({
+          key,
+          value,
+          category: 'serverManagement',
+          description: `Auto-bootstrapped from ${key} env var`,
+          isSensitive,
+        }),
+      );
+      applied += 1;
+    }
+
+    if (applied > 0) {
+      this.logger.log(
+        `Server management auto-bootstrapped ${applied} setting(s) from environment variables`,
+      );
     }
   }
 }

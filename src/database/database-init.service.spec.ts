@@ -39,10 +39,16 @@ describe('DatabaseInitService initial owner password', () => {
       where: jest.fn().mockReturnThis(),
       execute: jest.fn().mockResolvedValue({ affected: 0 }),
     };
+    const systemSettingRepository = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((s: unknown) => s),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
     const service = new DatabaseInitService(
       userRepository as never,
       { findOne: jest.fn().mockResolvedValue(null) } as never,
       { createQueryBuilder: jest.fn().mockReturnValue(query) } as never,
+      systemSettingRepository as never,
       {
         initializeStorage: jest.fn().mockResolvedValue({ guid: 'default' }),
       } as never,
@@ -135,10 +141,16 @@ describe('DatabaseInitService owner startup guard', () => {
       query: jest.fn().mockResolvedValue(undefined),
       options: { type: 'sqlite' as const },
     };
+    const systemSettingRepository = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((s: unknown) => s),
+      save: jest.fn().mockResolvedValue(undefined),
+    };
     const service = new DatabaseInitService(
       userRepository as never,
       undefined as never,
       undefined as never,
+      systemSettingRepository as never,
       {
         initializeStorage: jest.fn().mockResolvedValue({ guid: 'default' }),
       } as never,
@@ -148,12 +160,15 @@ describe('DatabaseInitService owner startup guard', () => {
       createDefaultAdmin: jest.Mock;
       cleanupUnusedDefaultOidcProviders: jest.Mock;
       cleanupExpiredAuthStates: jest.Mock;
+      bootstrapServerManagementFromEnv: jest.Mock;
     };
     const createDefaultAdmin = (internals.createDefaultAdmin = jest.fn());
     const cleanupUnusedDefaultOidcProviders =
       (internals.cleanupUnusedDefaultOidcProviders = jest.fn());
     const cleanupExpiredAuthStates = (internals.cleanupExpiredAuthStates =
       jest.fn());
+    const bootstrapServerManagementFromEnv =
+      (internals.bootstrapServerManagementFromEnv = jest.fn());
     return {
       service,
       userRepository,
@@ -161,6 +176,7 @@ describe('DatabaseInitService owner startup guard', () => {
       createDefaultAdmin,
       cleanupUnusedDefaultOidcProviders,
       cleanupExpiredAuthStates,
+      bootstrapServerManagementFromEnv,
     };
   }
 
@@ -176,6 +192,7 @@ describe('DatabaseInitService owner startup guard', () => {
     );
     expect(context.cleanupUnusedDefaultOidcProviders).toHaveBeenCalledTimes(1);
     expect(context.cleanupExpiredAuthStates).toHaveBeenCalledTimes(1);
+    expect(context.bootstrapServerManagementFromEnv).toHaveBeenCalledTimes(1);
   });
 
   it('rejects startup when legacy data contains multiple owners', async () => {
@@ -189,5 +206,6 @@ describe('DatabaseInitService owner startup guard', () => {
     expect(context.dataSource.query).not.toHaveBeenCalled();
     expect(context.cleanupUnusedDefaultOidcProviders).not.toHaveBeenCalled();
     expect(context.cleanupExpiredAuthStates).not.toHaveBeenCalled();
+    expect(context.bootstrapServerManagementFromEnv).not.toHaveBeenCalled();
   });
 });

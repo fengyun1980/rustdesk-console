@@ -1,0 +1,119 @@
+# All-in-One 一键部署
+# 整合 rustdesk-console（后端）+ rustdesk-console-web（前端）+ rustdesk-server（hbbs/hbbr）
+#
+# 使用方式：
+#   1. 复制 .env.aio.example 为 .env，按注释填入至少 JWT_SECRET 和 ADMIN_PASSWORD
+#   2. docker compose -f docker-compose.all-in-one.yml build rustdesk-console
+#   3. docker compose -f docker-compose.all-in-one.yml up -d
+#   4. 浏览器访问 http://<主机IP>:21114，用 admin / <ADMIN_PASSWORD> 登录即可
+#
+# 服务器端口：
+#   21114  Console Web 前端（唯一需要给浏览器访问的端口）
+#   21115  hbbs 注册（TCP）
+#   21116  hbbs 心跳（TCP + UDP）
+#   21117  hbbr 中继（TCP）
+#   21118  hbbs WebSocket ID（TCP）
+#   21119  hbbr WebSocket Relay（TCP）
+#
+# 注意：21115-21119 是 RustDesk 客户端协议端口，防火墙允许远程客户端访问即可。
+#        21120 仅容器内部使用（管理 API），不对宿主机暴露。
+
+services:
+  # ============ RustDesk Console 后端 ============
+  # 使用 Dockerfile 本地构建（包含 All-in-One 环境变量自动初始化）
+  rustdesk-console:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rustdesk-console:aio
+    container_name: rustdesk-console
+    restart: unless-stopped
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+      DB_TYPE: ${DB_TYPE:-sqlite}
+      DB_MIGRATE_ON_START: ${DB_MIGRATE_ON_START:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-log}
+
+      # MySQL 配置（DB_TYPE=mysql 时生效）
+      DB_HOST: ${DB_HOST:-localhost}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_USERNAME: ${DB_USERNAME:-rustdesk_console}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_DATABASE: ${DB_DATABASE:-rustdesk_console}
+
+      # —— 自动对接 RustDesk Server ——
+      # 以下变量会在首次启动时自动写入 system_settings，
+      # 登录后不需要再去 Settings 页面手动配置。
+      SERVER_MANAGEMENT_URL: http://hbbs:21120
+      SERVER_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN}
+      SERVER_MANAGEMENT_NODE_ID: ${SERVER_MANAGEMENT_NODE_ID:-rustdesk}
+      SERVER_MANAGEMENT_NODE_NAME: ${SERVER_MANAGEMENT_NODE_NAME:-RustDesk}
+    volumes:
+      - ${CONSOLE_DATA_DIR:-./data}:/data
+    networks:
+      - rustdesk-aio
+
+  # ============ RustDesk Console Web 前端 ============
+  rustdesk-console-web:
+    image: databk/rustdesk-console-web:latest
+    container_name: rustdesk-console-web
+    restart: unless-stopped
+    ports:
+      - '21114:80'
+    environment:
+      BACKEND_URL: http://rustdesk-console:3000
+    depends_on:
+      - rustdesk-console
+    networks:
+      - rustdesk-aio
+
+  # ============ RustDesk Server — ID / 注册 / 心跳 ============
+  hbbs:
+    image: databk/rustdesk-server:latest
+    container_name: hbbs
+    restart: unless-stopped
+    working_dir: /data
+    command: ['hbbs', '-r', '${RUSTDESK_RELAY_ADDRESS:-}']
+    environment:
+      HOME: /data
+      # 管理 API（Console 后端通过 hbbs:21120 访问）
+      RD_MANAGEMENT_BIND: 0.0.0.0:21120
+      RD_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN:?请在 .env 中设置 SERVER_MANAGEMENT_TOKEN}
+      RD_MANAGEMENT_DIR: /data/management
+    ports:
+      # 21116 需要同时 TCP 和 UDP
+      - '21115:21115'
+      - '21116:21116'
+      - '21116:21116/udp'
+      - '21118:21118'
+    volumes:
+      - ${SERVER_DATA_DIR:-./data/server}:/data
+    networks:
+      - rustdesk-aio
+
+  # ============ RustDesk Server — Relay / 中继 ============
+  hbbr:
+    image: databk/rustdesk-server:latest
+    container_name: hbbr
+    restart: unless-stopped
+    working_dir: /data
+    command: ['hbbr']
+    environment:
+      HOME: /data
+      RD_HBBS_API_URL: ws://hbbs:21120/v1/control
+      RD_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN:?请在 .env 中设置 SERVER_MANAGEMENT_TOKEN}
+      RD_RELAY_ID: ${HBBR_RELAY_ID:-relay-1}
+      RD_RELAY_ADDRESS: ${RUSTDESK_RELAY_ADDRESS:-}
+    ports:
+      - '21117:21117'
+      - '21119:21119'
+    volumes:
+      - ${RELAY_DATA_DIR:-./data/server-relay}:/data
+    networks:
+      - rustdesk-aio
+
+networks:
+  rustdesk-aio:
+    name: rustdesk-aio
+    driver: bridge
