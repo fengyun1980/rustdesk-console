@@ -58,7 +58,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: rustdesk-console:aio
+    image: ${CONSOLE_IMAGE:-rustdesk-console:aio}
     container_name: rustdesk-console
     restart: unless-stopped
     environment:
