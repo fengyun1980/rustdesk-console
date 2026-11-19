@@ -290,10 +290,27 @@ export class DatabaseInitService implements OnModuleInit {
     while (Date.now() < deadline) {
       if (existsSync(publicKeyPath)) {
         const content = readFileSync(publicKeyPath, 'utf8').trim();
+        // OpenSSH ed25519 公钥格式: "ssh-ed25519 <base64-blob> [comment]"
+        // base64-blob 解出来是: [u32=11]["ssh-ed25519"][u32=32][32字节裸公钥]
         const match = content.match(/^ssh-ed25519\s+([A-Za-z0-9+/=]+)/);
         if (match) {
-          publicKey = match[1];
-          break;
+          const blob = Buffer.from(match[1], 'base64');
+          // 按 wire format 头解析，兼容未来 keytype 变化
+          const keytypeLen = blob.readUInt32BE(0);
+          const pubkeyLen = blob.readUInt32BE(4 + keytypeLen);
+          const pubkeyStart = 4 + keytypeLen + 4;
+          const rawPubkey = blob.slice(pubkeyStart, pubkeyStart + pubkeyLen);
+          // 必须正好 32 字节且 base64 roundtrip 不变 —— resolveWebClientSettings 强校验
+          if (
+            rawPubkey.length === 32 &&
+            rawPubkey.toString('base64') === Buffer.from(rawPubkey.toString('base64'), 'base64').toString('base64')
+          ) {
+            publicKey = rawPubkey.toString('base64');
+            break;
+          }
+          this.logger.warn(
+            `[AIO] hbbs public key parsed but raw pubkey is ${rawPubkey.length} bytes (expected 32); retrying...`,
+          );
         }
       }
       await new Promise((r) => setTimeout(r, 2000));
@@ -322,14 +339,15 @@ export class DatabaseInitService implements OnModuleInit {
       !!allowedOrigin && allowedOrigin.startsWith('https://');
 
     const pairs: Array<[string, string, boolean]> = [
-      // 外部公开 WebSocket（浏览器实际连接）
-      ['webClient.idServerUrl', `wss://${wssIdHost}/ws`, false],
-      ['webClient.relayServerUrl', `wss://${wssRelayHost}/ws`, false],
-      // 服务器公钥（从 hbbs 读出来的）
+      // 外部公开 WebSocket（浏览器实际连接，通过 Console Gateway 反向代理到 hbbs/hbbr）
+      // path 必须是 /ws/id 和 /ws/relay —— resolveWebClientSettings 严格校验
+      ['webClient.idServerUrl', `wss://${wssIdHost}/ws/id`, false],
+      ['webClient.relayServerUrl', `wss://${wssRelayHost}/ws/relay`, false],
+      // 服务器公钥（从 hbbs id_ed25519.pub 提取的裸 32 字节公钥 base64）
       ['webClient.serverPublicKey', publicKey, true],
-      // 内部直连（让 Console Gateway 绕过公网直接连 hbbs/hbbr）
-      ['webClient.idUpstreamUrl', 'ws://hbbs:21118/ws/id', false],
-      ['webClient.relayUpstreamUrl', 'ws://hbbr:21119/ws/relay', false],
+      // 内部直连（Console Gateway 直接连 hbbs/hbbr 的原生 WS，不需要 path）
+      ['webClient.idUpstreamUrl', 'ws://hbbs:21118', false],
+      ['webClient.relayUpstreamUrl', 'ws://hbbr:21119', false],
       // 启用开关（只有用户提供 HTTPS origin 时才启用）
       ['webClient.enabled', String(enableWebClient), false],
     ];
