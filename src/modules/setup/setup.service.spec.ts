@@ -79,6 +79,14 @@ describe('SetupService', () => {
     createService();
     mockGeneralSettings.getSiteSettings.mockResolvedValue(freshSiteSettings());
     mockGeneralSettings.getSettings.mockResolvedValue(freshGeneralSettings());
+    // Mock global.fetch — SetupService.fetchHbbsPublicKey calls hbbs /v1/status
+    // to auto-pull the Ed25519 key. Most tests don't need that path, so make
+    // fetch fail fast (returns ok:false → key stays undefined → web client
+    // stays disabled unless the test supplies its own serverPublicKey).
+    (global as any).fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({}),
+    });
   });
 
   // ---------- Status detection ----------

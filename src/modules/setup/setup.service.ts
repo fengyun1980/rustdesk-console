@@ -136,49 +136,36 @@ export class SetupService {
       `Admin credentials set during setup wizard. username=${dto.adminUsername}`,
     );
 
-    // ---- Pre-check: optional public key ----
-    let hasValidPublicKey = false;
-    if (dto.serverPublicKey) {
-      const decoded = Buffer.from(dto.serverPublicKey, 'base64');
-      if (decoded.length === 32 && decoded.toString('base64') === dto.serverPublicKey) {
-        hasValidPublicKey = true;
+    // ---- Pre-check: optional public key from DTO (user-supplied override) ----
+    let userSuppliedKey = dto.serverPublicKey;
+    let hasValidUserKey = false;
+    if (userSuppliedKey) {
+      const decoded = Buffer.from(userSuppliedKey, 'base64');
+      if (decoded.length === 32 && decoded.toString('base64') === userSuppliedKey) {
+        hasValidUserKey = true;
       } else {
         warnings.push({
           code: 'invalid_public_key',
           message:
             'Supplied serverPublicKey is not a valid Base64-encoded 32-byte Ed25519 key; web client will not be auto-enabled.',
         });
+        userSuppliedKey = undefined;
       }
     }
 
-    // ---- Build web client update plan (only eligible when HTTPS) ----
+    // ---- Build web client URL plan (only eligible when HTTPS) ----
     let webClientEligible = false;
-    let webClientEnabled = false;
     let webClientUpdate: UpdateWebClientSettingsDto | null = null;
 
     if (isHttps) {
       webClientEligible = true;
       const host = parsed.host; // includes non-default port when present
-      const idServerUrl = `wss://${host}/ws/id`;
-      const relayServerUrl = `wss://${host}/ws/relay`;
       webClientUpdate = {
         allowedOrigin: origin,
-        idServerUrl,
-        relayServerUrl,
+        idServerUrl: `wss://${host}/ws/id`,
+        relayServerUrl: `wss://${host}/ws/relay`,
+        enabled: false, // default; flipped below once we have a key
       };
-      if (hasValidPublicKey) {
-        webClientUpdate.serverPublicKey = dto.serverPublicKey;
-        webClientUpdate.enabled = true;
-        webClientEnabled = true;
-      } else {
-        // Pre-fill addresses but keep disabled; admin enables later once key exists
-        webClientUpdate.enabled = false;
-        warnings.push({
-          code: 'web_client_pending_key',
-          message:
-            'Web client addresses pre-filled. Paste the Server Pro hbbs id_ed25519.pub into "Settings → Web Client" and enable it.',
-        });
-      }
     } else {
       warnings.push({
         code: 'web_client_skipped',
@@ -187,8 +174,7 @@ export class SetupService {
       });
     }
 
-    // ---- Write site URL (commit point, must succeed) ----
-    // Fetch current settings so we don't clobber unrelated fields
+    // ---- Write site URL ----
     const currentGeneral = await this.generalSettingsService.getSettings();
     const siteUpdate: UpdateGeneralSettingsDto = {
       watermarkEnabled: currentGeneral.watermarkEnabled,
@@ -199,21 +185,13 @@ export class SetupService {
       webauthn: currentGeneral.webauthn,
       site: {
         frontendUrl: origin,
-        backendUrl: '', // auto-follows frontend via getSiteSettings()
+        backendUrl: '',
       },
     };
     await this.generalSettingsService.updateSettings(siteUpdate);
 
-    // ---- Write web client settings (if HTTPS) ----
-    if (webClientUpdate) {
-      await this.webClientSettingsService.updateSettings(webClientUpdate);
-      await this.webClientService.refresh();
-    }
-
     // ---- Auto-configure hbbs management API (ServerManagement) ----
-    // Console and hbbs share one JWT_SECRET in integrated deployments, so the
-    // hbbs management API Bearer token is just our JWT secret. The management
-    // API port is Server Pro default 21120; host follows the console origin.
+    // Console and hbbs share one JWT_SECRET in integrated deployments.
     const jwtSecret = process.env.JWT_SECRET || JWT_DEFAULT_SECRET;
     const usingDefaultSecret = !process.env.JWT_SECRET;
     const managementUrl = `http://${parsed.host}:${HBBS_MANAGEMENT_PORT}`;
@@ -239,6 +217,56 @@ export class SetupService {
         message:
           'JWT_SECRET is not set — using the default development secret. Set it via environment variable in production.',
       });
+    }
+
+    // ---- Auto-pull hbbs public_key from management API ----
+    // Now that ServerManagement is configured, call hbbs /v1/status to fetch
+    // its Ed25519 public key. This avoids the "paste id_ed25519.pub manually"
+    // step — key is read directly from the running hbbs instance.
+    let fetchedPublicKey: string | undefined;
+    if (smConfigured) {
+      fetchedPublicKey = await this.fetchHbbsPublicKey(managementUrl, jwtSecret);
+      if (fetchedPublicKey) {
+        this.logger.log('Fetched hbbs public key from /v1/status');
+      } else {
+        this.logger.warn(
+          'Could not fetch hbbs public key from /v1/status; web client stays disabled',
+        );
+      }
+    }
+
+    // ---- Decide web client key source and final state ----
+    // Priority: user-supplied key > hbbs API fetched key > disabled with warning
+    let finalPublicKey: string | undefined;
+    if (hasValidUserKey && userSuppliedKey) {
+      finalPublicKey = userSuppliedKey;
+    } else if (fetchedPublicKey) {
+      finalPublicKey = fetchedPublicKey;
+    }
+
+    let webClientEnabled = false;
+    if (webClientUpdate) {
+      if (finalPublicKey) {
+        webClientUpdate.serverPublicKey = finalPublicKey;
+        webClientUpdate.enabled = true;
+        webClientEnabled = true;
+      } else {
+        webClientUpdate.enabled = false;
+        const reason = smConfigured
+          ? 'hbbs management API reachable but did not return a valid public key'
+          : 'hbbs management API not configured';
+        warnings.push({
+          code: 'web_client_pending_key',
+          message:
+            `Web client addresses pre-filled but disabled (${reason}). Start hbbs and run setup again, or paste its id_ed25519.pub manually in "Settings → Web Client".`,
+        });
+      }
+    }
+
+    // ---- Write web client settings ----
+    if (webClientUpdate) {
+      await this.webClientSettingsService.updateSettings(webClientUpdate);
+      await this.webClientService.refresh();
     }
 
     this.logger.log(
@@ -270,6 +298,41 @@ export class SetupService {
     }
 
     return result;
+  }
+
+  /**
+   * Fetch hbbs Ed25519 public key via the management API /v1/status endpoint.
+   * Returns undefined when hbbs is unreachable or the key is missing/invalid.
+   * Tolerates network errors — setup must never fail because hbbs isn't up
+   * yet; it just degrades to web client disabled with a warning.
+   */
+  private async fetchHbbsPublicKey(
+    managementUrl: string,
+    token: string,
+  ): Promise<string | undefined> {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch(`${managementUrl}/v1/status`, {
+        redirect: 'error',
+        headers: { authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!response.ok) return undefined;
+      const json: any = await response.json();
+      const key = json?.public_key ?? json?.data?.public_key;
+      if (typeof key !== 'string' || !key) return undefined;
+      // Validate: must be Base64-encoded 32-byte Ed25519 public key
+      const trimmed = key.trim();
+      const decoded = Buffer.from(trimmed, 'base64');
+      if (decoded.length !== 32 || decoded.toString('base64') !== trimmed) {
+        return undefined;
+      }
+      return trimmed;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
