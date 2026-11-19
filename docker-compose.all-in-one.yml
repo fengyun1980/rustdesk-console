@@ -55,9 +55,10 @@ services:
       # —— Web Client（网页远控）自动配置 ——
       # Console 后端会自动等待 hbbs 起来读公钥并填好 upstream URL；
       # 提供了 WEB_CLIENT_ORIGIN=https://... 时会自动启用网页远控。
+      # 有反代时推荐同时提供 CONSOLE_PUBLIC_URL=https://你的域名
       DATA_DIR: ${CONSOLE_DATA_DIR:-/data}
       PUBLIC_HOST: ${PUBLIC_HOST:-}
-      RUSTDESK_RELAY_ADDRESS: ${RUSTDESK_RELAY_ADDRESS:-}
+      CONSOLE_PUBLIC_URL: ${CONSOLE_PUBLIC_URL:-}
       WEB_CLIENT_ORIGIN: ${WEB_CLIENT_ORIGIN:-}
     volumes:
       - ${CONSOLE_DATA_DIR:-./data}:/data

@@ -324,31 +324,58 @@ export class DatabaseInitService implements OnModuleInit {
       return;
     }
 
-    const publicHost =
-      process.env.PUBLIC_HOST?.trim() ||
-      process.env.RUSTDESK_RELAY_ADDRESS?.trim()?.split(':')[0];
-    const relayAddress =
-      process.env.RUSTDESK_RELAY_ADDRESS?.trim() || 'relay-placeholder:21117';
-    // relayAddress 形如 host:port，id 端口是 host:21118
-    const relayHost = relayAddress.split(':')[0];
-    const wssIdHost = `${relayHost}:21118`;
-    const wssRelayHost = `${relayHost}:21119`;
-
     const allowedOrigin = process.env.WEB_CLIENT_ORIGIN?.trim();
     const enableWebClient =
       !!allowedOrigin && allowedOrigin.startsWith('https://');
 
+    // ---- idServerUrl / relayServerUrl 构建 ----
+    // 这俩是浏览器直接连接的 WSS 地址，走 Console Gateway：
+    //   浏览器 → wss://<host>/ws/id  → Lucky/Caddy → Console NestJS → idUpstreamUrl → hbbs
+    //                          /ws/relay  → relayUpstreamUrl → hbbr
+    // Gateway 路由在 Console 的 HTTP 端口上（默认 21114，被反代到 443），
+    // 所以这里不能写 hbbs 原生端口 21118/21119——那是 upstream 用的。
+    const consolePublicUrl = process.env.CONSOLE_PUBLIC_URL?.trim();
+    let serverHost: string;
+    let serverPort: string | undefined;
+    if (consolePublicUrl) {
+      // 用户显式指定，如 https://rustdesk.yourdomain.com 或 https://host:21114
+      try {
+        const u = new URL(consolePublicUrl);
+        serverHost = u.hostname;
+        serverPort = u.port || undefined;
+      } catch {
+        serverHost = consolePublicUrl.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+      }
+    } else if (allowedOrigin) {
+      // 从 WEB_CLIENT_ORIGIN=https://rustdesk.yourdomain.com 推导
+      try {
+        const u = new URL(allowedOrigin);
+        serverHost = u.hostname;
+        serverPort = u.port || undefined;
+      } catch {
+        serverHost = allowedOrigin.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+      }
+    } else {
+      // 没有反代域名，用探测到的 PUBLIC_HOST + Console 端口（默认 21114）
+      serverHost =
+        process.env.PUBLIC_HOST?.trim() ||
+        process.env.RUSTDESK_RELAY_ADDRESS?.trim()?.split(':')[0] ||
+        'console.local';
+      const consolePort = process.env.PORT?.trim() || '21114';
+      serverPort = consolePort;
+    }
+    const serverUrlBase = serverPort ? `${serverHost}:${serverPort}` : serverHost;
+
     const pairs: Array<[string, string, boolean]> = [
-      // 外部公开 WebSocket（浏览器实际连接，通过 Console Gateway 反向代理到 hbbs/hbbr）
-      // path 必须是 /ws/id 和 /ws/relay —— resolveWebClientSettings 严格校验
-      ['webClient.idServerUrl', `wss://${wssIdHost}/ws/id`, false],
-      ['webClient.relayServerUrl', `wss://${wssRelayHost}/ws/relay`, false],
-      // 服务器公钥（从 hbbs id_ed25519.pub 提取的裸 32 字节公钥 base64）
+      // 外部公开 WebSocket —— 浏览器连 Gateway 路由
+      ['webClient.idServerUrl', `wss://${serverUrlBase}/ws/id`, false],
+      ['webClient.relayServerUrl', `wss://${serverUrlBase}/ws/relay`, false],
+      // 服务器公钥（OpenSSH ed25519 → 裸 32 字节 → base64）
       ['webClient.serverPublicKey', publicKey, true],
-      // 内部直连（Console Gateway 直接连 hbbs/hbbr 的原生 WS，不需要 path）
+      // 内部直连 —— Console Gateway 绕过网络直接进 hbbs/hbbr 原生 WS
       ['webClient.idUpstreamUrl', 'ws://hbbs:21118', false],
       ['webClient.relayUpstreamUrl', 'ws://hbbr:21119', false],
-      // 启用开关（只有用户提供 HTTPS origin 时才启用）
+      // 启用开关（只有 HTTPS origin 才自动启用）
       ['webClient.enabled', String(enableWebClient), false],
     ];
 
