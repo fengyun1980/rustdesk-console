@@ -35,35 +35,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Step 5: 用 metadata-action 生成 tag 字符串
-      # main 分支 → latest + main + sha-xxxxxxx
-      # trae/agent → aio + sha-xxxxxxx
-      # tag v*    → latest + 版本号 + 主版本号 + sha-xxxxxxx
+      # metadata-action v5 — tags 格式：
+      #   type=sha              → ghcr.io/org/repo:sha-xxxxxxxxxxxx
+      #   type=ref,event=branch → 自动匹配 branch push，value=branch 名
+      #   type=ref,event=tag    → 自动匹配 tag push
+      #   type=raw              → 自定义 tag
+      #   type=semver           → 自动匹配 v* tag
       - uses: docker/metadata-action@v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha,format=long,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=main,enable={{is_default_branch}}
-            type=raw,value=aio,enable={{branch == 'trae/agent-0sKjvb'}}
-            type=semver,pattern={{version}},enable={{startsWith(github.ref, 'refs/tags/v')}}
-            type=semver,pattern={{major}}.{{minor}},enable={{startsWith(github.ref, 'refs/tags/v')}}
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
-      - name: Show tags
+      - name: Override aio tag for trae branch
+        id: final-tags
         run: |
-          echo "=== Will push ==="
-          echo '${{ steps.meta.outputs.tags }}'
-          echo "=== Labels ==="
-          echo '${{ steps.meta.outputs.labels }}'
+          CURRENT_TAGS="${{ steps.meta.outputs.tags }}"
+          if [ "${{ github.ref }}" = "refs/heads/trae/agent-0sKjvb" ]; then
+            CURRENT_TAGS="${CURRENT_TAGS}
+ghcr.io/${{ github.repository }}:aio"
+          fi
+          # 去重、去空行
+          CURRENT_TAGS=$(echo "$CURRENT_TAGS" | sed '/^$/d' | sort -u)
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$CURRENT_TAGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "=== Final tags ==="
+          echo "$CURRENT_TAGS"
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.final-tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             APP_VERSION=${{ github.ref_name }}
