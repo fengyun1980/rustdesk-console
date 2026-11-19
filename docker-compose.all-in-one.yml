@@ -90,6 +90,8 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST:-}
       CONSOLE_PUBLIC_URL: ${CONSOLE_PUBLIC_URL:-}
       WEB_CLIENT_ORIGIN: ${WEB_CLIENT_ORIGIN:-}
+      # 设为 1 时强制覆盖已有的 Web Client settings（哪怕不是占位符）
+      FORCE_WEB_CLIENT_BOOTSTRAP: ${FORCE_WEB_CLIENT_BOOTSTRAP:-}
     volumes:
       - ${CONSOLE_DATA_DIR:-./data}:/data
     networks:

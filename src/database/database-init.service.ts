@@ -435,34 +435,57 @@ export class DatabaseInitService implements OnModuleInit {
       pairs.push(['webClient.allowedOrigin', allowedOrigin, false]);
     }
 
+    // 占位符关键词 — 数据库里残留这些值时必须覆盖
+    const PLACEHOLDER_PATTERNS = [
+      'example.com',
+      'console.example',
+      'wss://console',
+      'ws://console',
+      'console.local',
+    ];
+    const FORCE = process.env.FORCE_WEB_CLIENT_BOOTSTRAP === '1';
+
     let applied = 0;
+    let overwritten = 0;
     for (const [key, value, isSensitive] of pairs) {
       const existing = await this.systemSettingRepository.findOne({
         where: { key },
       });
-      if (existing) continue;
+
+      // 跳过条件：key 已存在 + 值不是占位符 + 没开 FORCE
+      if (existing && !FORCE) {
+        const oldVal = (existing.value || '').toLowerCase();
+        const isPlaceholder = PLACEHOLDER_PATTERNS.some((p) =>
+          oldVal.includes(p),
+        );
+        const isEmpty = !oldVal || oldVal.trim() === '';
+        if (!isPlaceholder && !isEmpty) continue;
+      }
+
       await this.systemSettingRepository.save(
         this.systemSettingRepository.create({
           key,
           value,
           category,
-          description: `Auto-bootstrapped by DatabaseInitService (AIO)`,
+          description: FORCE
+            ? `Force-refreshed by AIO bootstrap (FORCE_WEB_CLIENT_BOOTSTRAP=1)`
+            : `Auto-bootstrapped by DatabaseInitService (AIO)`,
           isSensitive,
         }),
       );
-      applied += 1;
+      if (existing) overwritten += 1;
+      else applied += 1;
     }
 
-    if (applied > 0) {
-      if (enableWebClient) {
-        this.logger.log(
-          `[AIO] Web Client auto-configured (${applied} setting(s)) — ENABLED`,
-        );
-      } else {
-        this.logger.log(
-          `[AIO] Web Client skeleton configured (${applied} setting(s)); disabled.`,
-        );
-      }
+    const total = applied + overwritten;
+    if (total > 0) {
+      const parts: string[] = [];
+      if (applied > 0) parts.push(`${applied} new`);
+      if (overwritten > 0) parts.push(`${overwritten} overwritten`);
+      const verb = enableWebClient ? 'ENABLED' : 'disabled';
+      this.logger.log(
+        `[AIO] Web Client auto-configured (${parts.join(', ')}) — ${verb}`,
+      );
     }
   }
 }

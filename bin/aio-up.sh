@@ -122,6 +122,12 @@ if [ -n "$CLI_DOMAIN" ]; then
 fi
 
 # ------------- 4. 把 secrets 导入当前 shell 环境 -------------
+# 先清理可能残留的反引号（用户手动编辑或早期脚本 bug 带入）
+if grep -q '`' "$SECRETS_FILE" 2>/dev/null; then
+  sed -i 's/`//g' "$SECRETS_FILE"
+  echo "• 清理了 $SECRETS_FILE 里的反引号残留"
+fi
+
 set -a
 # shellcheck disable=SC1090
 . "$SECRETS_FILE"
@@ -141,20 +147,27 @@ CADDY_IP="${PUBLIC_HOST:-}"
 export CADDY_DOMAIN CADDY_IP CADDY_HTTP_PORT CADDY_HTTPS_PORT
 bash "$SCRIPT_DIR/generate-caddyfile.sh"
 
-# ------------- 6. 计算 CONSOLE_PUBLIC_URL（决定 Console bootstrap 用什么协议）-------------
-# 这个值决定了 Console 后端生成什么地址给前端用
+# ------------- 6. 计算 CONSOLE_PUBLIC_URL + WEB_CLIENT_ORIGIN -------------
+# 这两个值决定后端 bootstrap Web Client Settings（网页远控自动配置）
 if [ -z "${CONSOLE_PUBLIC_URL:-}" ]; then
   if [ -n "$CLI_DOMAIN" ]; then
     CLEAN="${CLI_DOMAIN#https://}"; CLEAN="${CLEAN#http://}"; CLEAN="${CLEAN%%/*}"; CLEAN="${CLEAN%%:*}"
     CONSOLE_PUBLIC_URL="https://$CLEAN"
   elif [ -n "${PUBLIC_HOST:-}" ]; then
-    # 裸 IP + Caddy 自签 HTTPS（443）
     CONSOLE_PUBLIC_URL="https://${PUBLIC_HOST}:${CADDY_HTTPS_PORT:-4443}"
   else
     CONSOLE_PUBLIC_URL="http://console.local:${CADDY_HTTP_PORT:-880}"
   fi
   export CONSOLE_PUBLIC_URL
   echo "✓ CONSOLE_PUBLIC_URL=$CONSOLE_PUBLIC_URL"
+fi
+
+# WEB_CLIENT_ORIGIN —— 只有 CONSOLE_PUBLIC_URL 是 https:// 才自动设（允许混合内容）
+if [ -z "${WEB_CLIENT_ORIGIN:-}" ]; then
+  if [ "$CONSOLE_PUBLIC_URL" = https://* ]; then
+    export WEB_CLIENT_ORIGIN="$CONSOLE_PUBLIC_URL"
+    echo "✓ WEB_CLIENT_ORIGIN=$WEB_CLIENT_ORIGIN  （网页远控自动启用）"
+  fi
 fi
 
 # ------------- 7. 启动 Compose -------------
