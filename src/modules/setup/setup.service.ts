@@ -6,12 +6,12 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import * as bcrypt from 'bcryptjs';
 import { GeneralSettingsService } from '../settings/services/general-settings.service';
 import { UpdateGeneralSettingsDto } from '../settings/dto/general-settings.dto';
 import { WebClientSettingsService } from '../web-client/web-client-settings.service';
 import { UpdateWebClientSettingsDto } from '../web-client/dto/web-client-settings.dto';
 import { WebClientService } from '../web-client/web-client.service';
-import { UserService } from '../user/user.service';
 import { User } from '../user/entities/user.entity';
 import { CompleteSetupDto } from './dto/complete-setup.dto';
 
@@ -51,7 +51,6 @@ export class SetupService {
     private readonly generalSettingsService: GeneralSettingsService,
     private readonly webClientSettingsService: WebClientSettingsService,
     private readonly webClientService: WebClientService,
-    private readonly userService: UserService,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
   ) {}
@@ -106,32 +105,21 @@ export class SetupService {
       });
     }
 
-    // ---- Pre-check: optional password change (before any writes) ----
-    let passwordChanged = false;
-    if (dto.currentAdminPassword || dto.newAdminPassword) {
-      if (!dto.currentAdminPassword || !dto.newAdminPassword) {
-        throw new BadRequestException(
-          'currentAdminPassword and newAdminPassword must be provided together',
-        );
-      }
-      if (dto.newAdminPassword.length < 6) {
-        throw new BadRequestException(
-          'newAdminPassword must be at least 6 characters',
-        );
-      }
-      const adminUser = await this.findAdminUser();
-      if (!adminUser) {
-        throw new BadRequestException('No admin user found');
-      }
-      // changePassword does bcrypt comparison internally; bubbles up as
-      // BadRequestException('Current password is incorrect') which we let pass
-      await this.userService.changePassword(adminUser.guid, {
-        current_password: dto.currentAdminPassword,
-        new_password: dto.newAdminPassword,
-      });
-      passwordChanged = true;
-      this.logger.log('Admin password changed during setup wizard');
+    // ---- Pre-check & write: admin username + password (must succeed first) ----
+    const adminUser = await this.userRepository.findOne({
+      where: { isAdmin: true },
+    });
+    if (!adminUser) {
+      throw new BadRequestException('No admin user found');
     }
+    adminUser.username = dto.adminUsername;
+    adminUser.password = await bcrypt.hash(dto.adminPassword, 10);
+    adminUser.displayName = dto.adminUsername;
+    await this.userRepository.save(adminUser);
+    const passwordChanged = true;
+    this.logger.log(
+      `Admin credentials set during setup wizard. username=${dto.adminUsername}`,
+    );
 
     // ---- Pre-check: optional public key ----
     let hasValidPublicKey = false;
@@ -237,8 +225,6 @@ export class SetupService {
    * fragments, credentials and whitespace.
    */
   private normalizeOrigin(input: string): string {
-    // Reject anything containing whitespace anywhere (including leading/trailing).
-    // Users shouldn't need to trim — if they paste " https://x ", something is wrong.
     if (typeof input !== 'string' || !input.trim()) {
       throw new BadRequestException('serverUrl is required');
     }
@@ -263,20 +249,10 @@ export class SetupService {
       throw new BadRequestException('serverUrl must not contain credentials');
     }
 
-    // Reject anything beyond scheme+host (pathname always starts with '/' —
-    // an empty path has pathname === '/')
     if (url.pathname && url.pathname !== '/') {
       throw new BadRequestException('serverUrl must not contain a path');
     }
 
-    // Reconstruct origin (strips default ports, trailing slashes, etc.)
     return url.origin;
-  }
-
-  private async findAdminUser(): Promise<User | null> {
-    return this.userRepository.findOne({
-      where: { isAdmin: true },
-      select: ['guid'],
-    });
   }
 }

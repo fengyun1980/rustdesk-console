@@ -2,21 +2,31 @@
 jest.mock('../settings/services/general-settings.service', () => ({}));
 jest.mock('../web-client/web-client-settings.service', () => ({}));
 jest.mock('../web-client/web-client.service', () => ({}));
-jest.mock('../user/user.service', () => ({}));
 
 import { ConflictException, BadRequestException } from '@nestjs/common';
 import { SetupService } from './setup.service';
 import { CompleteSetupDto } from './dto/complete-setup.dto';
 
 const VALID_PUBLIC_KEY = Buffer.alloc(32, 7).toString('base64');
+const BASE_DTO = {
+  serverUrl: 'https://rdc.tmnas.top',
+  adminUsername: 'admin',
+  adminPassword: 'admin123',
+};
 
 describe('SetupService', () => {
   let service: SetupService;
   let mockGeneralSettings: any;
   let mockWebClientSettings: any;
   let mockWebClient: any;
-  let mockUserService: any;
   let mockUserRepo: any;
+
+  const adminUser = {
+    guid: 'admin-guid',
+    username: 'databk',
+    isAdmin: true,
+    save: jest.fn().mockReturnThis(),
+  };
 
   const createService = () => {
     mockGeneralSettings = {
@@ -26,38 +36,55 @@ describe('SetupService', () => {
     };
     mockWebClientSettings = { updateSettings: jest.fn() };
     mockWebClient = { refresh: jest.fn() };
-    mockUserService = { changePassword: jest.fn() };
-    mockUserRepo = { findOne: jest.fn() };
+    mockUserRepo = {
+      findOne: jest.fn(),
+      save: jest.fn(),
+    };
+    mockUserRepo.findOne.mockResolvedValue(adminUser);
+    mockUserRepo.save.mockResolvedValue({ ...adminUser, username: 'admin' });
 
     service = new SetupService(
       mockGeneralSettings,
       mockWebClientSettings,
       mockWebClient,
-      mockUserService,
       mockUserRepo,
     );
   };
 
-  beforeEach(() => createService());
+  const freshSiteSettings = () => ({
+    frontendUrl: '',
+    backendUrl: '',
+    effectiveFrontendUrl: 'http://localhost:3000',
+    effectiveBackendUrl: 'http://localhost:3000',
+  });
+
+  const freshGeneralSettings = () => ({
+    watermarkEnabled: true,
+    defaultLanguage: 'en-US',
+    jwtExpiryDays: 30,
+    auditRetentionDays: 0,
+    deviceCloneIsolation: false,
+    site: { frontendUrl: '', backendUrl: '' },
+    webauthn: { enabled: true, rpName: 'RustDesk Console' },
+  });
+
+  beforeEach(() => {
+    createService();
+    mockGeneralSettings.getSiteSettings.mockResolvedValue(freshSiteSettings());
+    mockGeneralSettings.getSettings.mockResolvedValue(freshGeneralSettings());
+  });
 
   // ---------- Status detection ----------
 
   it('reports completed=false when no frontendUrl is configured', async () => {
-    mockGeneralSettings.getSiteSettings.mockResolvedValue({
-      frontendUrl: '',
-      backendUrl: '',
-      effectiveFrontendUrl: 'http://localhost:3000',
-      effectiveBackendUrl: 'http://localhost:3000',
-    });
+    mockGeneralSettings.getSiteSettings.mockResolvedValue(freshSiteSettings());
     await expect(service.getStatus()).resolves.toEqual({ completed: false });
   });
 
   it('reports completed=true when frontendUrl is already set (upgrade path)', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
+      ...freshSiteSettings(),
       frontendUrl: 'https://rdc.tmnas.top',
-      backendUrl: '',
-      effectiveFrontendUrl: 'https://rdc.tmnas.top',
-      effectiveBackendUrl: 'https://rdc.tmnas.top',
     });
     await expect(service.getStatus()).resolves.toEqual({ completed: true });
   });
@@ -66,26 +93,19 @@ describe('SetupService', () => {
 
   it('rejects POST with 409 when setup is already completed', async () => {
     mockGeneralSettings.getSiteSettings.mockResolvedValue({
+      ...freshSiteSettings(),
       frontendUrl: 'https://rdc.tmnas.top',
-      backendUrl: '',
-      effectiveFrontendUrl: 'https://rdc.tmnas.top',
-      effectiveBackendUrl: 'https://rdc.tmnas.top',
     });
     await expect(
-      service.complete({ serverUrl: 'https://another.example.com' }),
+      service.complete({ serverUrl: 'https://another.example.com', adminUsername: 'admin', adminPassword: 'admin123' }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
+    expect(mockUserRepo.save).not.toHaveBeenCalled();
   });
 
   // ---------- Invalid URLs ----------
 
   it('rejects serverUrl with path/query/fragment/non-http(s)/credentials/whitespace', async () => {
-    mockGeneralSettings.getSiteSettings.mockResolvedValue({
-      frontendUrl: '', backendUrl: '',
-      effectiveFrontendUrl: 'http://localhost:3000',
-      effectiveBackendUrl: 'http://localhost:3000',
-    });
-
     for (const bad of [
       'https://example.com/some/path',
       'https://example.com?x=1',
@@ -95,34 +115,20 @@ describe('SetupService', () => {
       '  https://example.com  ',
     ]) {
       await expect(
-        service.complete({ serverUrl: bad }),
+        service.complete({ ...BASE_DTO, serverUrl: bad }),
       ).rejects.toBeInstanceOf(BadRequestException);
     }
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
+    expect(mockUserRepo.save).not.toHaveBeenCalled();
   });
 
   // ---------- HTTPS + valid key: full success path ----------
 
-  it('derives web client URLs and enables it when HTTPS + valid public key', async () => {
-    mockGeneralSettings.getSiteSettings.mockResolvedValue({
-      frontendUrl: '', backendUrl: '',
-      effectiveFrontendUrl: 'http://localhost:3000',
-      effectiveBackendUrl: 'http://localhost:3000',
-    });
-    mockGeneralSettings.getSettings.mockResolvedValue({
-      watermarkEnabled: true,
-      defaultLanguage: 'en-US',
-      jwtExpiryDays: 30,
-      auditRetentionDays: 0,
-      deviceCloneIsolation: false,
-      site: { frontendUrl: '', backendUrl: '' },
-      webauthn: { enabled: true, rpName: 'RustDesk Console' },
-    });
-
+  it('derives web client URLs, enables it, and sets admin credentials', async () => {
     const result = await service.complete({
-      serverUrl: 'https://rdc.tmnas.top',
+      ...BASE_DTO,
       serverPublicKey: VALID_PUBLIC_KEY,
-    } satisfies CompleteSetupDto);
+    });
 
     expect(result.completed).toBe(true);
     expect(result.origin).toBe('https://rdc.tmnas.top');
@@ -132,7 +138,16 @@ describe('SetupService', () => {
     expect(result.webClient.relayServerUrl).toBe('wss://rdc.tmnas.top/ws/relay');
     expect(result.webClient.allowedOrigin).toBe('https://rdc.tmnas.top');
     expect(result.warnings).toEqual([]);
+    expect(result.passwordChanged).toBe(true);
 
+    // Admin credentials written
+    expect(adminUser.username).toBe('admin');
+    expect(typeof adminUser.password).toBe('string');
+    expect(adminUser.password.length).toBeGreaterThan(30); // bcrypt hash
+    expect(adminUser.displayName).toBe('admin');
+    expect(mockUserRepo.save).toHaveBeenCalled();
+
+    // Site + web client settings
     expect(mockGeneralSettings.updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         site: { frontendUrl: 'https://rdc.tmnas.top', backendUrl: '' },
@@ -153,24 +168,7 @@ describe('SetupService', () => {
   // ---------- HTTPS + no key: prefilled but disabled ----------
 
   it('pre-fills web client addresses but keeps disabled when HTTPS but no key', async () => {
-    mockGeneralSettings.getSiteSettings.mockResolvedValue({
-      frontendUrl: '', backendUrl: '',
-      effectiveFrontendUrl: 'http://localhost:3000',
-      effectiveBackendUrl: 'http://localhost:3000',
-    });
-    mockGeneralSettings.getSettings.mockResolvedValue({
-      watermarkEnabled: true,
-      defaultLanguage: 'en-US',
-      jwtExpiryDays: 30,
-      auditRetentionDays: 0,
-      deviceCloneIsolation: false,
-      site: { frontendUrl: '', backendUrl: '' },
-      webauthn: { enabled: true, rpName: 'RustDesk Console' },
-    });
-
-    const result = await service.complete({
-      serverUrl: 'https://rdc.tmnas.top',
-    } satisfies CompleteSetupDto);
+    const result = await service.complete({ ...BASE_DTO });
 
     expect(result.webClient.eligible).toBe(true);
     expect(result.webClient.enabled).toBe(false);
@@ -182,30 +180,17 @@ describe('SetupService', () => {
         expect.objectContaining({ code: 'web_client_pending_key' }),
       ]),
     );
+    expect(result.passwordChanged).toBe(true);
   });
 
   // ---------- HTTP origin: web client skipped ----------
 
   it('skips web client config for HTTP origin, emits http_only warning', async () => {
-    mockGeneralSettings.getSiteSettings.mockResolvedValue({
-      frontendUrl: '', backendUrl: '',
-      effectiveFrontendUrl: 'http://localhost:3000',
-      effectiveBackendUrl: 'http://localhost:3000',
-    });
-    mockGeneralSettings.getSettings.mockResolvedValue({
-      watermarkEnabled: true,
-      defaultLanguage: 'en-US',
-      jwtExpiryDays: 30,
-      auditRetentionDays: 0,
-      deviceCloneIsolation: false,
-      site: { frontendUrl: '', backendUrl: '' },
-      webauthn: { enabled: true, rpName: 'RustDesk Console' },
-    });
-
     const result = await service.complete({
+      ...BASE_DTO,
       serverUrl: 'http://192.168.1.100:8080',
       serverPublicKey: VALID_PUBLIC_KEY,
-    } satisfies CompleteSetupDto);
+    });
 
     expect(result.origin).toBe('http://192.168.1.100:8080');
     expect(result.webClient.eligible).toBe(false);
@@ -218,91 +203,22 @@ describe('SetupService', () => {
         expect.objectContaining({ code: 'web_client_skipped' }),
       ]),
     );
-    expect(mockGeneralSettings.updateSettings).toHaveBeenCalled();
+    // Admin still written even without HTTPS
+    expect(result.passwordChanged).toBe(true);
+    expect(mockUserRepo.save).toHaveBeenCalled();
   });
 
-  // ---------- Password: wrong password → nothing written ----------
+  // ---------- No admin user found ----------
 
-  it('does not write any settings when admin password is wrong', async () => {
-    mockGeneralSettings.getSiteSettings.mockResolvedValue({
-      frontendUrl: '', backendUrl: '',
-      effectiveFrontendUrl: 'http://localhost:3000',
-      effectiveBackendUrl: 'http://localhost:3000',
-    });
-    mockUserRepo.findOne.mockResolvedValue({ guid: 'admin-guid' });
-    mockUserService.changePassword.mockRejectedValue(
-      new BadRequestException('Current password is incorrect'),
-    );
+  it('rejects when no admin user exists in DB', async () => {
+    mockUserRepo.findOne.mockResolvedValue(null);
 
     await expect(
-      service.complete({
-        serverUrl: 'https://rdc.tmnas.top',
-        currentAdminPassword: 'wrong',
-        newAdminPassword: 'newsecret',
-      } satisfies CompleteSetupDto),
+      service.complete({ ...BASE_DTO }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();
-    expect(mockWebClient.refresh).not.toHaveBeenCalled();
-  });
-
-  // ---------- Password: correct password + full setup ----------
-
-  it('changes admin password, writes site URL, configures web client', async () => {
-    mockGeneralSettings.getSiteSettings.mockResolvedValue({
-      frontendUrl: '', backendUrl: '',
-      effectiveFrontendUrl: 'http://localhost:3000',
-      effectiveBackendUrl: 'http://localhost:3000',
-    });
-    mockGeneralSettings.getSettings.mockResolvedValue({
-      watermarkEnabled: true,
-      defaultLanguage: 'en-US',
-      jwtExpiryDays: 30,
-      auditRetentionDays: 0,
-      deviceCloneIsolation: false,
-      site: { frontendUrl: '', backendUrl: '' },
-      webauthn: { enabled: true, rpName: 'RustDesk Console' },
-    });
-    mockUserRepo.findOne.mockResolvedValue({ guid: 'admin-guid' });
-
-    const result = await service.complete({
-      serverUrl: 'https://rdc.tmnas.top',
-      serverPublicKey: VALID_PUBLIC_KEY,
-      currentAdminPassword: 'oldpass',
-      newAdminPassword: 'newsecret',
-    } satisfies CompleteSetupDto);
-
-    expect(result.passwordChanged).toBe(true);
-    expect(mockUserService.changePassword).toHaveBeenCalledWith(
-      'admin-guid',
-      { current_password: 'oldpass', new_password: 'newsecret' },
-    );
-    expect(mockGeneralSettings.updateSettings).toHaveBeenCalled();
-    expect(mockWebClientSettings.updateSettings).toHaveBeenCalled();
-  });
-
-  // ---------- Password fields must appear together ----------
-
-  it('rejects when only one of currentAdminPassword / newAdminPassword is provided', async () => {
-    mockGeneralSettings.getSiteSettings.mockResolvedValue({
-      frontendUrl: '', backendUrl: '',
-      effectiveFrontendUrl: 'http://localhost:3000',
-      effectiveBackendUrl: 'http://localhost:3000',
-    });
-
-    await expect(
-      service.complete({
-        serverUrl: 'https://rdc.tmnas.top',
-        currentAdminPassword: 'oldpass',
-      } as CompleteSetupDto),
-    ).rejects.toBeInstanceOf(BadRequestException);
-
-    await expect(
-      service.complete({
-        serverUrl: 'https://rdc.tmnas.top',
-        newAdminPassword: 'newsecret',
-      } as CompleteSetupDto),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(mockUserRepo.save).not.toHaveBeenCalled();
   });
 });
