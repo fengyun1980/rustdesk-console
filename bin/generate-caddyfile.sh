@@ -2,21 +2,23 @@
 # =====================================================================
 # generate-caddyfile.sh — 根据部署场景自动生成 Caddyfile
 #
+# 关键设计：
+#   Caddyfile 里的监听端口永远写容器内部端口 :80 和 :443！
+#   因为 Caddy 运行在 Docker 容器里，docker-compose 负责把
+#   宿主机端口（880/4443）映射到容器端口（80/443）。
+#   CADDY_HTTP_PORT / CADDY_HTTPS_PORT 只用来打印访问提示和
+#   在 HTTP→HTTPS 跳转时拼对 URL。
+#
 # 输入（全部通过环境变量，可选）：
 #   CADDY_DOMAIN       反代域名（如 rustdesk.example.com）→ 自动 Let's Encrypt
 #                      空 / 占位符 → 裸 IP 场景，走 openssl 自签证书
 #   CADDY_IP           服务器 IP（裸 IP 自签证书时用来写 SAN）
-#   CADDY_HTTP_PORT    HTTP 端口（默认 880）
-#   CADDY_HTTPS_PORT   HTTPS 端口（默认 4443）
+#   CADDY_HTTP_PORT    宿主机 HTTP 端口（默认 880），仅用于打印/跳转 URL
+#   CADDY_HTTPS_PORT   宿主机 HTTPS 端口（默认 4443），仅用于打印/跳转 URL
 #   CONSOLE_WEB        前端容器（默认 rustdesk-console-web:80）
 #   CONSOLE_API        后端容器（默认 rustdesk-console:3000）
 #   CADDY_OUT          Caddyfile 输出路径（默认 ./deploy/Caddyfile.generated）
 #   CERTS_DIR          证书目录（默认 ./data/certs）
-#
-# Caddy 反代策略（路径优先级）：
-#   1. /api/*  → 后端 NestJS（API）
-#   2. /ws/*   → 后端 NestJS Gateway（WebSocket 网页远控）
-#   3. 其他    → 前端静态文件（Vue SPA fallback）
 # =====================================================================
 set -euo pipefail
 
@@ -115,19 +117,21 @@ $CADDY_DOMAIN {
     reverse_proxy $CONSOLE_WEB
 }
 
-:$CADDY_HTTP_PORT {
+:80 {
     redir https://$CADDY_DOMAIN{uri} 301
 }
 EOF
 else
-  echo "✓ 无域名 / 裸 IP 场景 → openssl 自签 :$CADDY_HTTPS_PORT"
+  echo "✓ 无域名 / 裸 IP 场景 → openssl 自签 :443"
+  # 注意：Caddy 跑在容器里，监听 :443（容器端口），
+  # 宿主机端口由 docker-compose 映射（默认 880→80, 4443→443）
   cat > "$CADDY_OUT" <<EOF
 {
     auto_https off
     admin off
 }
 
-:$CADDY_HTTPS_PORT {
+:443 {
     tls /etc/certs/server.crt /etc/certs/server.key
 
     # —— 后端 API（NestJS）——
@@ -146,7 +150,7 @@ else
     reverse_proxy $CONSOLE_WEB
 }
 
-:$CADDY_HTTP_PORT {
+:80 {
     redir https://{host}:$CADDY_HTTPS_PORT{uri} 301
 }
 EOF
