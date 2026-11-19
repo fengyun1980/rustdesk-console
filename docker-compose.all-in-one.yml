@@ -46,6 +46,7 @@ services:
       - '${CADDY_HTTPS_PORT:-4443}:443'
     volumes:
       - ./deploy/Caddyfile.generated:/etc/caddy/Caddyfile:ro
+      - ./data/certs:/etc/certs:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:

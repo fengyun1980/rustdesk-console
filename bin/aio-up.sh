@@ -9,15 +9,15 @@
 #   bash bin/aio-up.sh -d rustdesk.example.com --force-recreate
 #
 # 启动后浏览器打开：
-#   无域名：  https://<服务器IP>                 （自签证书，点「继续访问」）
-#   有域名：  https://rustdesk.example.com       （自动 LE 证书，绿色锁）
+#   无域名：  https://<服务器IP>:4443             （自签证书，点「继续访问」）
+#   有域名：  https://rustdesk.example.com        （自动 LE 证书，绿色锁）
 #   admin / admin 登录
 #
 # 自动完成的事（客户什么都不用干）：
 #   ✓ 生成 JWT_SECRET + SERVER_MANAGEMENT_TOKEN + admin/admin
 #   ✓ 探测 PUBLIC_HOST（hostname -I 取第一个 IPv4）
-#   ✓ 生成 Caddyfile（有域名 → 自动 LE；无域名 → 自签 HTTPS）
-#   ✓ Caddy 起在 80/443，反代到 console-web，WebSocket 自动支持
+#   ✓ 生成 Caddyfile + openssl 自签证书（裸 IP 场景）
+#   ✓ Caddy 起在 880/4443，分路径反代（/api/*→后端，其他→前端）
 #   ✓ Console bootstrap 自动等 hbbs 起来 → 读公钥 → 配置 Web Client
 #   ✓ 自动启用网页远控（有域名→wss；无域名→ws，按场景降级）
 #   ✓ Server Management 自动对接 hbbs/hbbr（同 compose 网络）
@@ -151,7 +151,7 @@ if [ -z "${CONSOLE_PUBLIC_URL:-}" ]; then
     # 裸 IP + Caddy 自签 HTTPS（443）
     CONSOLE_PUBLIC_URL="https://${PUBLIC_HOST}:${CADDY_HTTPS_PORT:-4443}"
   else
-    CONSOLE_PUBLIC_URL="http://console.local:${CADDY_HTTP_PORT:-80}"
+    CONSOLE_PUBLIC_URL="http://console.local:${CADDY_HTTP_PORT:-880}"
   fi
   export CONSOLE_PUBLIC_URL
   echo "✓ CONSOLE_PUBLIC_URL=$CONSOLE_PUBLIC_URL"
