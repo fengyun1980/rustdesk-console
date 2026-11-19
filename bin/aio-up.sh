@@ -5,18 +5,18 @@
 # 自动完成：
 #   1. 生成随机 JWT_SECRET + SERVER_MANAGEMENT_TOKEN
 #   2. 探测主机 PUBLIC_HOST（hostname -I 取第一个 IPv4）
-#   3. 启动后 Console 会自动等 hbbs 起来读公钥、配置 Web Client
+#   3. 可选：--domain 一键配置 HTTPS 反代域名 → 自动启用网页远控
+#   4. 启动后 Console 会自动等 hbbs 起来读公钥、配置 Web Client
 #
 # 使用：
-#   bash bin/aio-up.sh             # 后台启动
-#   bash bin/aio-up.sh --build     # 重建 backend 镜像
-#   bash bin/aio-up.sh -d --force-recreate
+#   bash bin/aio-up.sh                        # 后台启动（纯内网 HTTP）
+#   bash bin/aio-up.sh -d rustdesk.example.com # 带 HTTPS 域名，自动启用网页远控
+#   bash bin/aio-up.sh --build                # 重建 backend 镜像
+#   bash bin/aio-up.sh --build -d rustdesk.example.com
+#   bash bin/aio-up.sh -d rustdesk.example.com --force-recreate
 #
 # 首次启动后：浏览器访问 http://<IP>:21114，admin / admin 登录
-#
-# 可选环境变量（覆盖自动探测）：
-#   PUBLIC_HOST=your.domain.com           公网 IP 或域名（自动探测失败时用）
-#   WEB_CLIENT_ORIGIN=https://your.domain.com  提供 HTTPS origin 会自动启用网页远控
+# 配好反代域名 + TLS 后：浏览器访问 https://<域名>，网页远控自动可用
 # =====================================================================
 set -euo pipefail
 
@@ -28,14 +28,36 @@ SECRETS_DIR="./data/secrets"
 SECRETS_FILE="$SECRETS_DIR/secrets.env"
 mkdir -p "$SECRETS_DIR"
 
-# ------------- 0. 探测 PUBLIC_HOST（如未显式提供）-------------
+# ------------- 0. 解析 --domain / -d 参数 -------------
+CLI_DOMAIN=""
+COMPOSE_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d|--domain)
+      if [ -z "${2:-}" ]; then
+        echo "✗ --domain / -d 需要一个域名参数" >&2
+        exit 1
+      fi
+      CLI_DOMAIN="$2"
+      shift 2
+      ;;
+    -h|--help)
+      sed -n '2,20p' "$0"
+      exit 0
+      ;;
+    *)
+      COMPOSE_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# ------------- 1. 探测 PUBLIC_HOST -------------
 detect_public_host() {
-  # 1) 优先读用户已设置的环境变量 / secrets.env
   if [ -n "${PUBLIC_HOST:-}" ]; then
     echo "$PUBLIC_HOST"
     return
   fi
-  # 2) hostname -I 取第一个 IPv4（最常见的单网卡场景）
   if command -v hostname >/dev/null 2>&1; then
     local ip
     ip=$(hostname -I 2>/dev/null | awk '{print $1; exit}')
@@ -44,10 +66,10 @@ detect_public_host() {
       return
     fi
   fi
-  # 3) 没探测到 — 留空，后续 bootstrapWebClientFromEnv 会用 relay 地址兜底
   echo ""
 }
 
+# ------------- 2. 首次启动：生成密钥 -------------
 if [ ! -s "$SECRETS_FILE" ]; then
   if command -v openssl >/dev/null 2>&1; then
     rand48() { openssl rand -base64 48 | tr -d '\n'; }
@@ -78,13 +100,17 @@ if [ ! -s "$SECRETS_FILE" ]; then
     echo "SERVER_MANAGEMENT_NODE_ID=rustdesk"
     echo "SERVER_MANAGEMENT_NODE_NAME=RustDesk"
     echo ""
-    echo "# 公网主机（或公网 IP）—— 用于构造 WSS / allowedOrigin"
     if [ -n "$PUB_HOST" ]; then
+      echo "# 公网主机（或公网 IP）—— 用于构造 WSS / allowedOrigin"
       echo "PUBLIC_HOST=$PUB_HOST"
-      echo "# RUSTDESK_RELAY_ADDRESS=$PUB_HOST:21117"
+      echo ""
     fi
-    echo "# 如果要启用网页远控，提供 HTTPS 域名："
-    echo "# WEB_CLIENT_ORIGIN=https://your.domain.com"
+    echo "# 反代 HTTPS 域名（Lucky / Caddy / Nginx 都可以）："
+    echo "#   bash bin/aio-up.sh -d rustdesk.example.com"
+    echo "#   bash bin/aio-up.sh --domain rustdesk.example.com"
+    echo "# 自动设置以下两行，启用网页远控："
+    echo "# CONSOLE_PUBLIC_URL=https://rustdesk.example.com"
+    echo "# WEB_CLIENT_ORIGIN=https://rustdesk.example.com"
     echo ""
     echo "# 管理员账户（Console 首次启动时创建）"
     echo "ADMIN_USERNAME=admin"
@@ -95,20 +121,40 @@ if [ ! -s "$SECRETS_FILE" ]; then
   echo "✓ 首次启动 → 自动生成密钥到 $SECRETS_FILE"
   if [ -n "$PUB_HOST" ]; then
     echo "  探测到主机 IP: $PUB_HOST"
-  else
-    echo "  未自动探测到 PUBLIC_HOST — 如需网页远控请手动设置"
   fi
 else
   echo "• 复用已有密钥 $SECRETS_FILE"
 fi
 
-# ------------- 把 secrets 导入当前 shell 环境 -------------
+# ------------- 3. --domain 写入 secrets.env（追加或覆盖已有值）-------------
+if [ -n "$CLI_DOMAIN" ]; then
+  # 规范化：用户可能传 https://xxx 或 xxx
+  CLEAN_DOMAIN="${CLI_DOMAIN#https://}"
+  CLEAN_DOMAIN="${CLEAN_DOMAIN#http://}"
+  CLEAN_DOMAIN="${CLEAN_DOMAIN%%/*}"
+
+  # 删掉旧的两行（如果有），再在末尾追加 —— 首次和非首次启动都能用
+  tmp=$(mktemp)
+  grep -v '^CONSOLE_PUBLIC_URL=' "$SECRETS_FILE" | grep -v '^WEB_CLIENT_ORIGIN=' > "$tmp" || true
+  {
+    echo ""
+    echo "# — 反代域名（aio-up.sh -d $CLEAN_DOMAIN 自动写入）—"
+    echo "CONSOLE_PUBLIC_URL=https://$CLEAN_DOMAIN"
+    echo "WEB_CLIENT_ORIGIN=https://$CLEAN_DOMAIN"
+  } >> "$tmp"
+  mv "$tmp" "$SECRETS_FILE"
+  chmod 600 "$SECRETS_FILE"
+  echo "✓ 反代域名已写入: CONSOLE_PUBLIC_URL=https://$CLEAN_DOMAIN"
+  echo "                    WEB_CLIENT_ORIGIN=https://$CLEAN_DOMAIN"
+fi
+
+# ------------- 4. 把 secrets 导入当前 shell 环境 -------------
 # compose 的 `${VAR:-}` 优先读当前 shell 环境变量 ——
-# 这样 hbbs/hbbr 的 RD_MANAGEMENT_TOKEN 和 PUBLIC_HOST 都能拿到真实值。
+# 这样 hbbs/hbbr 的 RD_MANAGEMENT_TOKEN / 域名 / 反代配置都能拿到真实值。
 set -a
 # shellcheck disable=SC1090
 . "$SECRETS_FILE"
 set +a
 
-# ------------- 启动 Compose（透传所有参数）-------------
-exec docker compose -f docker-compose.all-in-one.yml up -d "$@"
+# ------------- 5. 启动 Compose（透传剩余参数）-------------
+exec docker compose -f docker-compose.all-in-one.yml up -d "${COMPOSE_ARGS[@]}"
