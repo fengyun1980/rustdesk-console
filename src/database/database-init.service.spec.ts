@@ -69,8 +69,8 @@ describe('DatabaseInitService initial owner password', () => {
 
     const owner = userRepository.create.mock.calls[0][0];
     expect(owner).toMatchObject({
-      username: 'databk',
-      email: 'databk@github.com',
+      username: 'admin',
+      email: 'admin@local',
       isAdmin: true,
       userGroupGuid: 'default',
     });
@@ -84,19 +84,19 @@ describe('DatabaseInitService initial owner password', () => {
     expect(logs).not.toContain(owner.password);
   });
 
-  it('retains the legacy fallback only when ADMIN_PASSWORD is absent', async () => {
+  it('retains the default fallback only when ADMIN_PASSWORD is absent', async () => {
     const { service, userRepository } = createService();
 
     await service.onModuleInit();
 
     const owner = userRepository.create.mock.calls[0][0];
-    expect(await bcrypt.compare('databk', owner.password!)).toBe(true);
+    expect(await bcrypt.compare('admin', owner.password!)).toBe(true);
     expect(bcrypt.getRounds(owner.password!)).toBe(10);
     expect(userRepository.save).toHaveBeenCalledWith(owner);
     expect(warn).toHaveBeenCalledWith(
-      'ADMIN_PASSWORD is not set; using the legacy default. Please change it immediately after first login!',
+      'ADMIN_PASSWORD is not set; using the default value. Please change it immediately after first login!',
     );
-    expect(JSON.stringify(warn.mock.calls)).not.toContain('databk');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('admin');
   });
 
   it('rejects an explicitly empty password before creating an owner', async () => {

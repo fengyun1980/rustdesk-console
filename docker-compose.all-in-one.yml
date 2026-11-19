@@ -2,10 +2,10 @@
 # 整合 rustdesk-console（后端）+ rustdesk-console-web（前端）+ rustdesk-server（hbbs/hbbr）
 #
 # 使用方式：
-#   1. 复制 .env.aio.example 为 .env，按注释填入至少 JWT_SECRET 和 ADMIN_PASSWORD
+#   1. 复制 .env.aio.example 为 .env，按注释填入至少 JWT_SECRET 和 SERVER_MANAGEMENT_TOKEN
 #   2. docker compose -f docker-compose.all-in-one.yml build rustdesk-console
 #   3. docker compose -f docker-compose.all-in-one.yml up -d
-#   4. 浏览器访问 http://<主机IP>:21114，用 admin / <ADMIN_PASSWORD> 登录即可
+#   4. 浏览器访问 http://<主机IP>:21114，用 admin / admin 登录即可
 #
 # 服务器端口：
 #   21114  Console Web 前端（唯一需要给浏览器访问的端口）

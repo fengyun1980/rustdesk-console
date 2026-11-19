@@ -87,17 +87,18 @@ export class DatabaseInitService implements OnModuleInit {
       return;
     }
 
-    const adminUsername = 'databk';
-    const adminEmail = 'databk@github.com';
+    const adminUsername = process.env.ADMIN_USERNAME?.trim() || 'admin';
+    const adminEmail =
+      process.env.ADMIN_EMAIL?.trim() || `${adminUsername}@local`;
     const configuredPassword = process.env.ADMIN_PASSWORD;
-    const adminPassword = configuredPassword ?? 'databk';
+    const adminPassword = configuredPassword ?? 'admin';
     if (adminPassword.length === 0) {
       throw new Error('ADMIN_PASSWORD must not be empty');
     }
 
     if (configuredPassword === undefined) {
       this.logger.warn(
-        'ADMIN_PASSWORD is not set; using the legacy default. Please change it immediately after first login!',
+        'ADMIN_PASSWORD is not set; using the default value. Please change it immediately after first login!',
       );
     }
 

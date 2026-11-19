@@ -587,7 +587,7 @@ describe('User group integration', () => {
 
     const createdUsers = await userRepository.find({
       where: [
-        { username: 'databk' },
+        { username: 'admin' },
         { username: 'registered-user' },
         { username: 'ldap-user' },
         { username: 'oidc-user' },
