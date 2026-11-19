@@ -16,21 +16,21 @@ concurrency:
 permissions:
   contents: read
 
+# 让 buildx 能直接从 meta 的 needs 拿到 IMAGE 名
+env:
+  DU: ${{ secrets.DOCKER_USERNAME }}
+  DT: ${{ secrets.DOCKERHUB_TOKEN }}
+
 jobs:
-  docker:
-    name: Build (amd64) and optionally push
+  meta:
+    name: Compute image metadata
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      push: ${{ steps.meta.outputs.push }}
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Compute tags
-        id: setup
-        env:
-          DU: ${{ secrets.DOCKER_USERNAME }}
-          DT: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
         run: |
           set -ex
           if [ -n "$DU" ] && [ -n "$DT" ]; then
@@ -40,6 +40,7 @@ jobs:
             IMAGE="rustdesk-console"
             echo "push=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           REF="${GITHUB_REF}"
           SHA7="${GITHUB_SHA::7}"
           {
@@ -62,8 +63,29 @@ jobs:
             echo "GHAEOF"
           } >> "$GITHUB_OUTPUT"
 
+  build:
+    needs: meta
+    name: Build ${{ matrix.arch }} ${{ needs.meta.outputs.push == 'true' && '& push' || '(no push)' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.arch == 'arm64'
+
+      - uses: docker/setup-buildx-action@v3
+
       - name: Login to Docker Hub
-        if: steps.setup.outputs.push == 'true'
+        if: needs.meta.outputs.push == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
@@ -72,25 +94,25 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ steps.setup.outputs.push == 'true' }}
-          platforms: linux/amd64
-          tags: ${{ steps.setup.outputs.tags }}
+          push: ${{ needs.meta.outputs.push == 'true' }}
+          platforms: ${{ matrix.platform }}
+          tags: ${{ needs.meta.outputs.tags }}
           build-args: |
             APP_VERSION=${{ github.ref_name }}
             SOURCE_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: ${{ steps.setup.outputs.push == 'true' && 'type=registry' || 'type=docker' }}
+          outputs: ${{ needs.meta.outputs.push == 'true' && 'type=registry' || 'type=docker' }}
 
       - name: Save artifact (no push)
-        if: steps.setup.outputs.push != 'true'
+        if: needs.meta.outputs.push != 'true'
         run: |
-          docker save -o rustdesk-console-aio.tar rustdesk-console:aio
-          ls -lh rustdesk-console-aio.tar
+          docker save -o rustdesk-console-${{ matrix.arch }}.tar ${{ needs.meta.outputs.image }}:aio
+          ls -lh rustdesk-console-${{ matrix.arch }}.tar
 
       - uses: actions/upload-artifact@v4
-        if: steps.setup.outputs.push != 'true'
+        if: needs.meta.outputs.push != 'true'
         with:
-          name: rustdesk-console-aio-amd64
-          path: rustdesk-console-aio.tar
+          name: rustdesk-console-aio-${{ matrix.arch }}
+          path: rustdesk-console-${{ matrix.arch }}.tar
           retention-days: 7
