@@ -1,26 +1,30 @@
 # All-in-One 一键部署
 # 整合 rustdesk-console（后端）+ rustdesk-console-web（前端）+ rustdesk-server（hbbs/hbbr）
 #
-# 使用方式：
-#   1. 复制 .env.aio.example 为 .env，按注释填入至少 JWT_SECRET 和 SERVER_MANAGEMENT_TOKEN
-#   2. docker compose -f docker-compose.all-in-one.yml build rustdesk-console
-#   3. docker compose -f docker-compose.all-in-one.yml up -d
-#   4. 浏览器访问 http://<主机IP>:21114，用 admin / admin 登录即可
+# 推荐启动（自动生成密钥，无需任何配置）：
+#   bash bin/aio-up.sh
 #
-# 服务器端口：
-#   21114  Console Web 前端（唯一需要给浏览器访问的端口）
+# 停止：
+#   bash bin/aio-down.sh
+#
+# 首次启动后：
+#   浏览器访问  http://<主机IP>:21114
+#   用户名 admin / 密码 admin
+#
+# 密钥文件位置（aio-up.sh 首次启动自动生成，后续重启复用）：
+#   ./data/secrets/secrets.env   如需手动重置密钥：删除此文件，重新 aio-up.sh
+#
+# 端口（21114 是唯一浏览器入口，21115-21119 供 RustDesk 客户端使用）：
+#   21114  Console Web 前端
 #   21115  hbbs 注册（TCP）
 #   21116  hbbs 心跳（TCP + UDP）
 #   21117  hbbr 中继（TCP）
-#   21118  hbbs WebSocket ID（TCP）
-#   21119  hbbr WebSocket Relay（TCP）
-#
-# 注意：21115-21119 是 RustDesk 客户端协议端口，防火墙允许远程客户端访问即可。
-#        21120 仅容器内部使用（管理 API），不对宿主机暴露。
+#   21118  hbbs WebSocket ID
+#   21119  hbbr WebSocket Relay
+#   21120  hbbs 管理 API（仅容器内部）
 
 services:
   # ============ RustDesk Console 后端 ============
-  # 使用 Dockerfile 本地构建（包含 All-in-One 环境变量自动初始化）
   rustdesk-console:
     build:
       context: .
@@ -29,24 +33,23 @@ services:
     container_name: rustdesk-console
     restart: unless-stopped
     environment:
-      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+      # —— 以下空值会由 Dockerfile ENTRYPOINT 自动生成 ——
+      # 如需手动覆盖，在启动前 export 或写进 secrets.env 后重新 aio-up.sh
+      JWT_SECRET: ${JWT_SECRET:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       DB_TYPE: ${DB_TYPE:-sqlite}
       DB_MIGRATE_ON_START: ${DB_MIGRATE_ON_START:-1}
       LOG_LEVEL: ${LOG_LEVEL:-log}
-
-      # MySQL 配置（DB_TYPE=mysql 时生效）
+      # MySQL（DB_TYPE=mysql 时生效）
       DB_HOST: ${DB_HOST:-localhost}
       DB_PORT: ${DB_PORT:-3306}
       DB_USERNAME: ${DB_USERNAME:-rustdesk_console}
       DB_PASSWORD: ${DB_PASSWORD:-}
       DB_DATABASE: ${DB_DATABASE:-rustdesk_console}
-
-      # —— 自动对接 RustDesk Server ——
-      # 以下变量会在首次启动时自动写入 system_settings，
-      # 登录后不需要再去 Settings 页面手动配置。
-      SERVER_MANAGEMENT_URL: http://hbbs:21120
-      SERVER_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN}
+      # —— 自动对接 RustDesk Server（同 compose 网络）——
+      SERVER_MANAGEMENT_URL: ${SERVER_MANAGEMENT_URL:-http://hbbs:21120}
+      SERVER_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN:-}
       SERVER_MANAGEMENT_NODE_ID: ${SERVER_MANAGEMENT_NODE_ID:-rustdesk}
       SERVER_MANAGEMENT_NODE_NAME: ${SERVER_MANAGEMENT_NODE_NAME:-RustDesk}
     volumes:
@@ -74,15 +77,18 @@ services:
     container_name: hbbs
     restart: unless-stopped
     working_dir: /data
-    command: ['hbbs', '-r', '${RUSTDESK_RELAY_ADDRESS:-}']
+    command: ['hbbs']
     environment:
       HOME: /data
-      # 管理 API（Console 后端通过 hbbs:21120 访问）
+      # RD_MANAGEMENT_TOKEN 必须 ≥ 32 字符。
+      # aio-up.sh 会预生成 secrets.env 后把值通过环境传进来；
+      # 如果绕过 aio-up.sh 直接跑 compose，这个值可能为空 ——
+      # hbbs 会在日志里提示 token 缺失后退出。
       RD_MANAGEMENT_BIND: 0.0.0.0:21120
-      RD_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN:?请在 .env 中设置 SERVER_MANAGEMENT_TOKEN}
+      RD_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN:-}
       RD_MANAGEMENT_DIR: /data/management
+      RD_RELAY_ADDRESS: ${RUSTDESK_RELAY_ADDRESS:-}
     ports:
-      # 21116 需要同时 TCP 和 UDP
       - '21115:21115'
       - '21116:21116'
       - '21116:21116/udp'
@@ -102,7 +108,7 @@ services:
     environment:
       HOME: /data
       RD_HBBS_API_URL: ws://hbbs:21120/v1/control
-      RD_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN:?请在 .env 中设置 SERVER_MANAGEMENT_TOKEN}
+      RD_MANAGEMENT_TOKEN: ${SERVER_MANAGEMENT_TOKEN:-}
       RD_RELAY_ID: ${HBBR_RELAY_ID:-relay-1}
       RD_RELAY_ADDRESS: ${RUSTDESK_RELAY_ADDRESS:-}
     ports:

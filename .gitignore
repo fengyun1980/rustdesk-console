@@ -67,3 +67,6 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# AIO all-in-one secrets (auto-generated, must never commit)
+/data/secrets/secrets.env
