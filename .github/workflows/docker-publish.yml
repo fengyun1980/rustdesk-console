@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   docker:
-    name: Build and push to Docker Hub
+    name: Build (and optionally push)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -28,16 +28,25 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
+      - name: Login to Docker Hub (if secrets configured)
+        id: login
+        if: env.DOCKER_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Compute tags
         id: tags
         run: |
-          IMAGE="${{ secrets.DOCKER_USERNAME }}/rustdesk-console"
+          if [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
+            IMAGE="${{ secrets.DOCKER_USERNAME }}/rustdesk-console"
+          else
+            IMAGE="rustdesk-console"
+          fi
           SHA7="${GITHUB_SHA::7}"
           TAGS_LIST="
             ${IMAGE}:sha-${SHA7}
@@ -74,13 +83,13 @@ jobs:
             echo "$CLEAN"
             echo "GHAEOF"
           } >> "$GITHUB_OUTPUT"
-          echo "=== Will push these tags ==="
+          echo "=== Will build/push these tags ==="
           echo "$CLEAN"
 
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ steps.login.outcome == 'success' }}
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
@@ -88,3 +97,23 @@ jobs:
             SOURCE_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: ${{ steps.login.outcome == 'success' && 'type=registry' || 'type=docker' }}
+
+      # 没 push 的话，把 build 好的镜像保存成 tar 供下载
+      - name: Save image as artifact
+        if: steps.login.outcome != 'success'
+        run: |
+          IMAGE="rustdesk-console:aio"
+          SHA7="${GITHUB_SHA::7}"
+          TAGGED="rustdesk-console:sha-${SHA7}"
+          docker tag "$TAGGED" "$IMAGE" 2>/dev/null || true
+          docker save -o rustdesk-console-aio.tar "$IMAGE" "$TAGGED"
+          ls -lh rustdesk-console-aio.tar
+
+      - uses: actions/upload-artifact@v4
+        if: steps.login.outcome != 'success'
+        with:
+          name: rustdesk-console-aio
+          path: rustdesk-console-aio.tar
+          if-no-files-found: error
+          retention-days: 7
