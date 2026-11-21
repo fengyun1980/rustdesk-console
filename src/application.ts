@@ -9,15 +9,15 @@ import { join, dirname } from 'path';
 import type { Request, Response, NextFunction } from 'express';
 import { businessWritesAllowed } from './updater/maintenance';
 import { rbacRequestScopeMiddleware } from './modules/rbac/rbac-request-scope.middleware';
-import {
-  REQUEST_ID_HEADER,
-  requestIdMiddleware,
-} from './common/middleware/request-id.middleware';
+import { requestIdMiddleware } from './common/middleware/request-id.middleware';
 import {
   isValidLogLevel,
   resolveLogLevels,
 } from './common/utils/log-level.util';
 import { DataSource } from 'typeorm';
+
+/** Cached allowed CORS origin, populated after setup locks the frontendUrl. */
+let allowedOriginCache: string | undefined;
 
 export async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -97,7 +97,7 @@ export async function bootstrap() {
   // saved frontendUrl — prevents CSRF against public POST endpoints.
   const dataSource = app.get(DataSource);
   app.use((request: Request, response: Response, next: NextFunction) => {
-    const incomingOrigin = request.headers.origin as string | undefined;
+    const incomingOrigin = request.headers.origin;
     if (!incomingOrigin) {
       next();
       return;
@@ -108,19 +108,16 @@ export async function bootstrap() {
       request.path === '/api/settings/setup' &&
       (request.method === 'GET' ||
         request.method === 'POST' ||
-        (request.method as string) === 'OPTIONS')
+        request.method === 'OPTIONS')
     ) {
       response.setHeader('Access-Control-Allow-Origin', incomingOrigin);
       response.setHeader('Access-Control-Allow-Credentials', 'true');
-      response.setHeader(
-        'Access-Control-Allow-Methods',
-        'GET, POST, OPTIONS',
-      );
+      response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       response.setHeader(
         'Access-Control-Allow-Headers',
         'Content-Type, Authorization',
       );
-      if ((request.method as string) === 'OPTIONS') {
+      if (request.method === 'OPTIONS') {
         response.statusCode = 204;
         response.end();
         return;
@@ -131,7 +128,7 @@ export async function bootstrap() {
 
     // Check setup state via DB (lightweight — one query per request, but
     // only until setup completes; after that frontendUrl stays cached here)
-    const cached = (bootstrap as any).__allowedOrigin;
+    const cached = allowedOriginCache;
     if (cached) {
       applyCors(incomingOrigin, cached, response);
       if (request.method === 'OPTIONS') {
@@ -144,16 +141,16 @@ export async function bootstrap() {
     }
 
     // Try DB lookup; fall back to permissive if not yet ready
-    (async () => {
+    void (async () => {
       try {
-        const row = await dataSource
-          .query(
+        const rows = await dataSource
+          .query<Array<{ value?: string }>>(
             "SELECT value FROM settings WHERE key = 'general.site.frontendUrl' LIMIT 1",
           )
           .catch(() => null);
-        const savedUrl: string | undefined = row?.[0]?.value;
+        const savedUrl = rows?.[0]?.value;
         if (savedUrl) {
-          (bootstrap as any).__allowedOrigin = savedUrl;
+          allowedOriginCache = savedUrl;
           applyCors(incomingOrigin, savedUrl, response);
         } else {
           // Setup not done yet — permissive
@@ -245,5 +242,5 @@ export async function bootstrap() {
  * committed so subsequent requests pick up the lock.
  */
 export function clearAllowedOriginCache(): void {
-  (bootstrap as any).__allowedOrigin = undefined;
+  allowedOriginCache = undefined;
 }

@@ -138,7 +138,11 @@ export class CustomClientController {
     @Body() dto: UploadFilesDto,
   ) {
     const buildToken = String(req.headers['x-build-token'] ?? '');
-    await this.customClientService.handleUpload(uuid, buildToken, dto.files ?? []);
+    await this.customClientService.handleUpload(
+      uuid,
+      buildToken,
+      dto.files ?? [],
+    );
     return { message: 'Upload processed' };
   }
 

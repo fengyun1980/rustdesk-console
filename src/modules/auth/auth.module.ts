@@ -1,10 +1,9 @@
-import { Module, Logger } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthController } from './auth.controller';
 import { PasswordResetController } from './password-reset.controller';
-import { randomBytes } from 'crypto';
 import {
   AuthService,
   AuthTokenService,
@@ -41,7 +40,6 @@ import { SystemSetting } from '../settings/entities/system-setting.entity';
  *   2. DB-persisted value (system_settings.auth.jwt.secret)
  *   3. Hardcoded fallback (only if both above fail — unlikely in fnOS Native FPK)
  */
-const JWT_SECRET_SETTING_KEY = 'auth.jwt.secret';
 const HARDCODED_FALLBACK = 'rustdesk-api-secret-key-change-in-production';
 
 function resolveJwtSecretSync(): string {
