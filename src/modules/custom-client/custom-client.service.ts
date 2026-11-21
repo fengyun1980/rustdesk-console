@@ -230,8 +230,8 @@ export class CustomClientService {
       return [];
     }
     try {
-      const parsed: unknown = JSON.parse(build.files);
-      return Array.isArray(parsed) ? (parsed as BuildFileDto[]) : [];
+      const parsed = JSON.parse(build.files);
+      return Array.isArray(parsed) ? parsed : [];
     } catch {
       return [];
     }
@@ -383,8 +383,7 @@ export class CustomClientService {
         action_required: 'action_required',
         stale: 'failed',
       };
-      const newStatus =
-        conclusionToStatus[runData.conclusion ?? 'failure'] ?? 'failed';
+      const newStatus = conclusionToStatus[runData.conclusion ?? 'failure'] ?? 'failed';
       await this.buildRepository.update(
         { uuid },
         {
@@ -395,7 +394,10 @@ export class CustomClientService {
       this.logger.log(
         `Build ${uuid} status auto-updated to ${newStatus} via GitHub API`,
       );
-    } else if (runData.status === 'in_progress' && build.status === 'pending') {
+    } else if (
+      runData.status === 'in_progress' &&
+      build.status === 'pending'
+    ) {
       await this.buildRepository.update(
         { uuid, status: 'pending' },
         { status: 'building' },
@@ -421,7 +423,10 @@ export class CustomClientService {
     return build;
   }
 
-  private assertBuildToken(build: CustomClientBuild, buildToken: string): void {
+  private assertBuildToken(
+    build: CustomClientBuild,
+    buildToken: string,
+  ): void {
     const tokenBuffer = Buffer.from(buildToken);
     const expectedBuffer = Buffer.from(build.buildToken);
     if (

@@ -9,6 +9,7 @@ jest.mock('../server-management/server-management-settings.service', () => ({
 
 import { ConflictException, BadRequestException } from '@nestjs/common';
 import { SetupService } from './setup.service';
+import { CompleteSetupDto } from './dto/complete-setup.dto';
 
 const VALID_PUBLIC_KEY = Buffer.alloc(32, 7).toString('base64');
 const BASE_DTO = {
@@ -25,7 +26,7 @@ describe('SetupService', () => {
   let mockServerManagementSettings: any;
   let mockUserRepo: any;
 
-  const adminUser: any = {
+  const adminUser = {
     guid: 'admin-guid',
     username: 'databk',
     isAdmin: true,
@@ -66,7 +67,7 @@ describe('SetupService', () => {
 
   const freshGeneralSettings = () => ({
     watermarkEnabled: true,
-    defaultLanguage: 'en-US',
+    defaultLanguage: 'zh-CN',
     jwtExpiryDays: 30,
     auditRetentionDays: 0,
     deviceCloneIsolation: false,
@@ -84,7 +85,7 @@ describe('SetupService', () => {
     // stays disabled unless the test supplies its own serverPublicKey).
     (global as any).fetch = jest.fn().mockResolvedValue({
       ok: false,
-      json: () => Promise.resolve({}),
+      json: async () => ({}),
     });
   });
 
@@ -111,11 +112,7 @@ describe('SetupService', () => {
       frontendUrl: 'https://rdc.tmnas.top',
     });
     await expect(
-      service.complete({
-        serverUrl: 'https://another.example.com',
-        adminUsername: 'admin',
-        adminPassword: 'admin123',
-      }),
+      service.complete({ serverUrl: 'https://another.example.com', adminUsername: 'admin', adminPassword: 'admin123' }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();
@@ -157,9 +154,7 @@ describe('SetupService', () => {
     expect(result.webClient.eligible).toBe(true);
     expect(result.webClient.enabled).toBe(true);
     expect(result.webClient.idServerUrl).toBe('wss://rdc.tmnas.top/ws/id');
-    expect(result.webClient.relayServerUrl).toBe(
-      'wss://rdc.tmnas.top/ws/relay',
-    );
+    expect(result.webClient.relayServerUrl).toBe('wss://rdc.tmnas.top/ws/relay');
     expect(result.webClient.allowedOrigin).toBe('https://rdc.tmnas.top');
     expect(result.warnings).toEqual(
       expect.arrayContaining([
@@ -213,10 +208,7 @@ describe('SetupService', () => {
     expect(result.webClient.eligible).toBe(true);
     expect(result.webClient.enabled).toBe(false);
     expect(mockWebClientSettings.updateSettings).toHaveBeenCalledWith(
-      expect.objectContaining({
-        enabled: false,
-        allowedOrigin: 'https://rdc.tmnas.top',
-      }),
+      expect.objectContaining({ enabled: false, allowedOrigin: 'https://rdc.tmnas.top' }),
     );
     expect(result.warnings).toEqual(
       expect.arrayContaining([
@@ -256,9 +248,9 @@ describe('SetupService', () => {
   it('rejects when no admin user exists in DB', async () => {
     mockUserRepo.findOne.mockResolvedValue(null);
 
-    await expect(service.complete({ ...BASE_DTO })).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
+    await expect(
+      service.complete({ ...BASE_DTO }),
+    ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(mockGeneralSettings.updateSettings).not.toHaveBeenCalled();
     expect(mockWebClientSettings.updateSettings).not.toHaveBeenCalled();

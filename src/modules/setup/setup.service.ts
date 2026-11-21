@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   Logger,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -14,10 +15,7 @@ import { UpdateWebClientSettingsDto } from '../web-client/dto/web-client-setting
 import { WebClientService } from '../web-client/web-client.service';
 import { ServerManagementSettingsService } from '../server-management/server-management-settings.service';
 import { UpdateServerManagementSettingsDto } from '../server-management/dto/server-management-settings.dto';
-import {
-  DEFAULT_NODE_ID,
-  DEFAULT_NODE_NAME,
-} from '../server-management/server-management-settings.service';
+import { DEFAULT_NODE_ID, DEFAULT_NODE_NAME } from '../server-management/server-management-settings.service';
 import { getCachedJwtSecret } from '../auth/auth.module';
 import { User } from '../user/entities/user.entity';
 import { CompleteSetupDto } from './dto/complete-setup.dto';
@@ -31,10 +29,11 @@ const HBBS_MANAGEMENT_PORT = 21120;
  * service probing via the setup wizard.
  */
 const RESERVED_BLOCKED_PORTS = new Set<number>([
-  1, 17, 19, 21, 23, 25, 43, 53, 67, 68, 69, 79, 88, 95, 106, 110, 111, 113,
-  119, 123, 135, 137, 138, 139, 143, 161, 162, 177, 389, 465, 512, 513, 514,
-  515, 544, 548, 587, 631, 636, 873, 993, 995, 1433, 1434, 1521, 1723, 3306,
-  3389, 5432, 5672, 6379, 8086, 9200, 27017, 27018, 27019,
+  1, 17, 19, 21, 23, 25, 43, 53, 67, 68, 69, 79, 88, 95, 106, 110,
+  111, 113, 119, 123, 135, 137, 138, 139, 143, 161, 162, 177, 389,
+  465, 512, 513, 514, 515, 544, 548, 587, 631, 636, 873, 993, 995,
+  1433, 1434, 1521, 1723, 3306, 3389, 5432, 5672, 6379, 8086, 9200,
+  27017, 27018, 27019,
 ]);
 
 /** Private-network CIDR blocklist for SSRF protection (fetchHbbsPublicKey). */
@@ -48,11 +47,11 @@ function isPrivateIp(hostname: string): boolean {
     const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
     if (m) {
       const [a, b] = [parseInt(m[1]), parseInt(m[2])];
-      if (a === 10) return true; // 10.0.0.0/8
+      if (a === 10) return true;               // 10.0.0.0/8
       if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-      if (a === 192 && b === 168) return true; // 192.168.0.0/16
-      if (a === 127) return true; // 127.0.0.0/8
-      if (a === 169 && b === 254) return true; // 169.254.0.0/16
+      if (a === 192 && b === 168) return true;          // 192.168.0.0/16
+      if (a === 127) return true;             // 127.0.0.0/8
+      if (a === 169 && b === 254) return true;          // 169.254.0.0/16
       return false;
     }
 
@@ -60,7 +59,7 @@ function isPrivateIp(hostname: string): boolean {
     if (h === '::1') return true;
     if (h === 'localhost') return true;
     if (h.startsWith('fc') || h.startsWith('fd')) return true; // ULA
-    if (h.startsWith('fe8')) return true; // link-local
+    if (h.startsWith('fe8')) return true;                       // link-local
 
     // DNS-resolve? No — don't do DNS rebinding risk. Fail open: treat all
     // hostnames that we can't classify via static rules as potentially
@@ -159,9 +158,7 @@ export class SetupService {
     }
   }
 
-  private async doComplete(
-    dto: CompleteSetupDto,
-  ): Promise<SetupCompletionResult> {
+  private async doComplete(dto: CompleteSetupDto): Promise<SetupCompletionResult> {
     const origin = this.normalizeOrigin(dto.serverUrl);
     const parsed = new URL(origin);
     const isHttps = parsed.protocol === 'https:';
@@ -203,10 +200,7 @@ export class SetupService {
     let hasValidUserKey = false;
     if (userSuppliedKey) {
       const decoded = Buffer.from(userSuppliedKey, 'base64');
-      if (
-        decoded.length === 32 &&
-        decoded.toString('base64') === userSuppliedKey
-      ) {
+      if (decoded.length === 32 && decoded.toString('base64') === userSuppliedKey) {
         hasValidUserKey = true;
       } else {
         warnings.push({
@@ -294,10 +288,7 @@ export class SetupService {
     // step — key is read directly from the running hbbs instance.
     let fetchedPublicKey: string | undefined;
     if (smConfigured) {
-      fetchedPublicKey = await this.fetchHbbsPublicKey(
-        managementUrl,
-        jwtSecret,
-      );
+      fetchedPublicKey = await this.fetchHbbsPublicKey(managementUrl, jwtSecret);
       if (fetchedPublicKey) {
         this.logger.log('Fetched hbbs public key from /v1/status');
       } else {
@@ -329,7 +320,8 @@ export class SetupService {
           : 'hbbs management API not configured';
         warnings.push({
           code: 'web_client_pending_key',
-          message: `Web client addresses pre-filled but disabled (${reason}). Start hbbs and run setup again, or paste its id_ed25519.pub manually in "Settings → Web Client".`,
+          message:
+            `Web client addresses pre-filled but disabled (${reason}). Start hbbs and run setup again, or paste its id_ed25519.pub manually in "Settings → Web Client".`,
         });
       }
     }
@@ -412,7 +404,9 @@ export class SetupService {
       port > 65535 ||
       RESERVED_BLOCKED_PORTS.has(port)
     ) {
-      this.logger.warn(`fetchHbbsPublicKey: SSRF block — invalid port ${port}`);
+      this.logger.warn(
+        `fetchHbbsPublicKey: SSRF block — invalid port ${port}`,
+      );
       return undefined;
     }
 
@@ -431,10 +425,7 @@ export class SetupService {
       });
       clearTimeout(timeout);
       if (!response.ok) return undefined;
-      const json = (await response.json()) as {
-        public_key?: unknown;
-        data?: { public_key?: unknown };
-      };
+      const json: any = await response.json();
       const key = json?.public_key ?? json?.data?.public_key;
       if (typeof key !== 'string' || !key) return undefined;
       // Validate: must be Base64-encoded 32-byte Ed25519 public key
@@ -497,9 +488,7 @@ export class SetupService {
     if (url.port) {
       const port = parseInt(url.port, 10);
       if (isNaN(port) || port < 1 || port > 65535) {
-        throw new BadRequestException(
-          'serverUrl port must be between 1 and 65535',
-        );
+        throw new BadRequestException('serverUrl port must be between 1 and 65535');
       }
       if (RESERVED_BLOCKED_PORTS.has(port)) {
         throw new BadRequestException(

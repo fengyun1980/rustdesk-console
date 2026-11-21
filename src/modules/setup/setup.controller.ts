@@ -8,11 +8,7 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../auth/decorators/public.decorator';
-import {
-  SetupService,
-  SetupStatus,
-  SetupCompletionResult,
-} from './setup.service';
+import { SetupService, SetupStatus, SetupCompletionResult } from './setup.service';
 import { CompleteSetupDto } from './dto/complete-setup.dto';
 
 /**

@@ -9,15 +9,15 @@ import { join, dirname } from 'path';
 import type { Request, Response, NextFunction } from 'express';
 import { businessWritesAllowed } from './updater/maintenance';
 import { rbacRequestScopeMiddleware } from './modules/rbac/rbac-request-scope.middleware';
-import { requestIdMiddleware } from './common/middleware/request-id.middleware';
+import {
+  REQUEST_ID_HEADER,
+  requestIdMiddleware,
+} from './common/middleware/request-id.middleware';
 import {
   isValidLogLevel,
   resolveLogLevels,
 } from './common/utils/log-level.util';
 import { DataSource } from 'typeorm';
-
-/** Cached allowed CORS origin, populated after setup locks the frontendUrl. */
-let allowedOriginCache: string | undefined;
 
 export async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -41,7 +41,9 @@ export async function bootstrap() {
         // disable dangerous inline script by default
         directives: {
           defaultSrc: ["'self'"],
-          scriptSrc: ["'self'"],
+          // Web client decodes via WebAssembly; allow wasm instantiation
+          // without enabling general eval.
+          scriptSrc: ["'self'", "'wasm-unsafe-eval'"],
           styleSrc: ["'self'", "'unsafe-inline'"],
           imgSrc: ["'self'", 'data:', 'blob:'],
           connectSrc: ["'self'"],
@@ -97,7 +99,7 @@ export async function bootstrap() {
   // saved frontendUrl — prevents CSRF against public POST endpoints.
   const dataSource = app.get(DataSource);
   app.use((request: Request, response: Response, next: NextFunction) => {
-    const incomingOrigin = request.headers.origin;
+    const incomingOrigin = request.headers.origin as string | undefined;
     if (!incomingOrigin) {
       next();
       return;
@@ -108,16 +110,19 @@ export async function bootstrap() {
       request.path === '/api/settings/setup' &&
       (request.method === 'GET' ||
         request.method === 'POST' ||
-        request.method === 'OPTIONS')
+        (request.method as string) === 'OPTIONS')
     ) {
       response.setHeader('Access-Control-Allow-Origin', incomingOrigin);
       response.setHeader('Access-Control-Allow-Credentials', 'true');
-      response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      response.setHeader(
+        'Access-Control-Allow-Methods',
+        'GET, POST, OPTIONS',
+      );
       response.setHeader(
         'Access-Control-Allow-Headers',
         'Content-Type, Authorization',
       );
-      if (request.method === 'OPTIONS') {
+      if ((request.method as string) === 'OPTIONS') {
         response.statusCode = 204;
         response.end();
         return;
@@ -128,7 +133,7 @@ export async function bootstrap() {
 
     // Check setup state via DB (lightweight — one query per request, but
     // only until setup completes; after that frontendUrl stays cached here)
-    const cached = allowedOriginCache;
+    const cached = (bootstrap as any).__allowedOrigin;
     if (cached) {
       applyCors(incomingOrigin, cached, response);
       if (request.method === 'OPTIONS') {
@@ -141,16 +146,16 @@ export async function bootstrap() {
     }
 
     // Try DB lookup; fall back to permissive if not yet ready
-    void (async () => {
+    (async () => {
       try {
-        const rows = await dataSource
-          .query<Array<{ value?: string }>>(
+        const row = await dataSource
+          .query(
             "SELECT value FROM settings WHERE key = 'general.site.frontendUrl' LIMIT 1",
           )
           .catch(() => null);
-        const savedUrl = rows?.[0]?.value;
+        const savedUrl: string | undefined = row?.[0]?.value;
         if (savedUrl) {
-          allowedOriginCache = savedUrl;
+          (bootstrap as any).__allowedOrigin = savedUrl;
           applyCors(incomingOrigin, savedUrl, response);
         } else {
           // Setup not done yet — permissive
@@ -242,5 +247,5 @@ export async function bootstrap() {
  * committed so subsequent requests pick up the lock.
  */
 export function clearAllowedOriginCache(): void {
-  allowedOriginCache = undefined;
+  (bootstrap as any).__allowedOrigin = undefined;
 }
