@@ -5,7 +5,6 @@ import {
   Matches,
   MinLength,
   MaxLength,
-  IsIn,
 } from 'class-validator';
 
 /**
@@ -36,7 +35,8 @@ export class CompleteSetupDto {
   @IsString()
   @IsNotEmpty()
   @Matches(/^[A-Za-z0-9_.@-]+$/, {
-    message: 'adminUsername may contain letters, numbers, dots, underscores, hyphens and @',
+    message:
+      'adminUsername may contain letters, numbers, dots, underscores, hyphens and @',
   })
   @MinLength(2)
   @MaxLength(64)
